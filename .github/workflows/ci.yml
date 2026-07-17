@@ -52,7 +52,9 @@ jobs:
         run: go mod verify
 
       - name: Verify tidy state
-        run: go mod tidy -diff
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
 
       - name: Vet
         run: go vet ./...
