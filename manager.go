@@ -313,10 +313,14 @@ func (manager *Manager[S, O]) Close(ctx context.Context) error {
 		manager.finishCloseLocked()
 	}
 	done := manager.done
+	closeErr := manager.closeErr
 	manager.mu.Unlock()
 
 	for _, work := range pending {
 		resolveManagerWaiters(work.waiters, Result[O]{}, concurrency.ErrClosed)
+	}
+	if closeErr != nil {
+		return closeErr
 	}
 	select {
 	case <-done:
