@@ -33,7 +33,11 @@ type Pending[S any] struct {
 	RetryAt time.Time
 }
 
-// Codec serializes and deserializes desired specifications.
+// Codec serializes and deserializes desired specifications. Marshal may return
+// scratch storage because Export copies each result before the next call.
+// Unmarshal must return an independently owned value whose mutable state stays
+// stable across later Codec calls; implementations must clone input-backed
+// slices, maps, pointers, and other reference values as needed.
 type Codec[S any] interface {
 	Marshal(S) ([]byte, error)
 	Unmarshal([]byte) (S, error)
