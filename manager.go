@@ -333,6 +333,8 @@ func (manager *Manager[S, O]) Close(ctx context.Context) error {
 	select {
 	case <-done:
 		return manager.closeError()
+	case <-manager.ctx.Done():
+		return manager.closeError()
 	case <-ctx.Done():
 		return manager.abort(context.Cause(ctx))
 	}
