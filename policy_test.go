@@ -25,6 +25,7 @@ func TestPolicyValidation(t *testing.T) {
 		{name: "negative base delay", policy: Policy{MaxAttempts: 1, BaseDelay: -time.Nanosecond}},
 		{name: "negative max delay", policy: Policy{MaxAttempts: 1, MaxDelay: -time.Nanosecond}},
 		{name: "negative attempt timeout", policy: Policy{MaxAttempts: 1, AttemptTimeout: -time.Nanosecond}},
+		{name: "negative rollback timeout", policy: Policy{MaxAttempts: 1, RollbackTimeout: -time.Nanosecond}},
 		{name: "max below base", policy: Policy{MaxAttempts: 1, BaseDelay: 2 * time.Second, MaxDelay: time.Second}},
 	}
 	for _, test := range tests {

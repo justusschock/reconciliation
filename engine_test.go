@@ -203,6 +203,43 @@ func TestEngineLeavesIrreversibleActionsOutOfRollback(t *testing.T) {
 	}
 }
 
+func TestEngineRetainsDependenciesOfResidualActions(t *testing.T) {
+	wantApplyErr := errors.New("apply z failed")
+	var undone []ActionID
+	adapter := &engineAdapter{
+		observe: constantObservation(1),
+		plan: func(context.Context, Desired[engineSpec], engineObserved) (Plan[engineAction], error) {
+			return Plan[engineAction]{Actions: []Action[engineAction]{
+				{ID: "a", Value: "dependency", Reversible: true},
+				{ID: "b", DependsOn: []ActionID{"a"}, Value: "retained", Reversible: false},
+				{ID: "x", Value: "independent", Reversible: true},
+				{ID: "z", DependsOn: []ActionID{"b", "x"}, Value: "failure", Reversible: true},
+			}}, nil
+		},
+		apply: func(_ context.Context, action Action[engineAction]) (Undo[engineUndo], error) {
+			if action.ID == "z" {
+				return Undo[engineUndo]{}, wantApplyErr
+			}
+			return Undo[engineUndo]{Value: engineUndo(action.Value)}, nil
+		},
+		undo: func(_ context.Context, undo Undo[engineUndo]) error {
+			undone = append(undone, undo.ActionID)
+			return nil
+		},
+	}
+
+	result, err := NewEngine(adapter, enginePolicy(1)).Reconcile(context.Background(), engineDesired())
+	if !errors.Is(err, wantApplyErr) {
+		t.Fatalf("Reconcile() error = %v, want %v", err, wantApplyErr)
+	}
+	if !slices.Equal(undone, []ActionID{"x"}) {
+		t.Fatalf("undone = %v, want only independent action x", undone)
+	}
+	if !result.Changed {
+		t.Fatalf("retained dependency closure not reflected: %#v", result)
+	}
+}
+
 func TestEngineJoinsRollbackErrorsAndDoesNotRetry(t *testing.T) {
 	wantApplyErr := Transient(errors.New("apply failed"))
 	wantUndoErr := errors.New("undo failed")
@@ -215,7 +252,7 @@ func TestEngineJoinsRollbackErrorsAndDoesNotRetry(t *testing.T) {
 	if !errors.Is(err, wantApplyErr) || !errors.Is(err, wantUndoErr) {
 		t.Fatalf("Reconcile() error = %v, want apply and undo errors", err)
 	}
-	if len(applied) != 3 || len(undone) != 2 || len(clock.Delays()) != 0 {
+	if len(applied) != 3 || len(undone) != 1 || undone[0].ActionID != "b" || len(clock.Delays()) != 0 {
 		t.Fatalf("rollback/retry mismatch: applied=%v undone=%v delays=%v", applied, undone, clock.Delays())
 	}
 	if !result.Changed {
@@ -268,6 +305,40 @@ func TestEngineRetriesAfterSuccessfulRollback(t *testing.T) {
 	}
 	if plans != 2 || observations != 3 || result.Observed != 3 || result.Changed {
 		t.Fatalf("plans=%d observations=%d result=%#v", plans, observations, result)
+	}
+}
+
+func TestEngineCarriesResidualChangeAcrossRetries(t *testing.T) {
+	wantTransient := Transient(errors.New("temporary apply failure"))
+	plans := 0
+	adapter := &engineAdapter{
+		observe: constantObservation(1),
+		plan: func(context.Context, Desired[engineSpec], engineObserved) (Plan[engineAction], error) {
+			plans++
+			if plans > 1 {
+				return Plan[engineAction]{}, nil
+			}
+			return Plan[engineAction]{Actions: []Action[engineAction]{
+				{ID: "a", Value: "retained", Reversible: false},
+				{ID: "b", DependsOn: []ActionID{"a"}, Value: "fails", Reversible: true},
+			}}, nil
+		},
+		apply: func(_ context.Context, action Action[engineAction]) (Undo[engineUndo], error) {
+			if action.ID == "b" {
+				return Undo[engineUndo]{}, wantTransient
+			}
+			return Undo[engineUndo]{Value: engineUndo(action.Value)}, nil
+		},
+		undo: unexpectedUndo(t),
+	}
+	clock := &recordingClock{immediate: true}
+
+	result, err := NewEngine(adapter, enginePolicy(2), WithClock(clock)).Reconcile(context.Background(), engineDesired())
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if plans != 2 || !result.Changed {
+		t.Fatalf("plans=%d result=%#v, want residual change preserved", plans, result)
 	}
 }
 
@@ -367,6 +438,76 @@ func TestEngineAttemptTimeoutRollsBackWithParentContext(t *testing.T) {
 	}
 	if len(undone) != 1 || undone[0].ActionID != "a" || result.Changed {
 		t.Fatalf("rollback=%#v result=%#v", undone, result)
+	}
+}
+
+func TestEngineParentCancellationDoesNotSuppressRollback(t *testing.T) {
+	ctx, cancel := context.WithCancelCause(context.Background())
+	wantCancel := errors.New("caller stopped")
+	var rollbackCause error
+	adapter := &engineAdapter{
+		observe: constantObservation(1),
+		plan: func(context.Context, Desired[engineSpec], engineObserved) (Plan[engineAction], error) {
+			return Plan[engineAction]{Actions: []Action[engineAction]{
+				{ID: "a", Value: "A", Reversible: true},
+				{ID: "b", DependsOn: []ActionID{"a"}, Value: "B", Reversible: true},
+			}}, nil
+		},
+		apply: func(ctx context.Context, action Action[engineAction]) (Undo[engineUndo], error) {
+			if action.ID == "b" {
+				cancel(wantCancel)
+				return Undo[engineUndo]{}, context.Cause(ctx)
+			}
+			return Undo[engineUndo]{Value: engineUndo(action.Value)}, nil
+		},
+		undo: func(ctx context.Context, _ Undo[engineUndo]) error {
+			rollbackCause = context.Cause(ctx)
+			return nil
+		},
+	}
+
+	result, err := NewEngine(adapter, enginePolicy(1)).Reconcile(ctx, engineDesired())
+	if !errors.Is(err, wantCancel) {
+		t.Fatalf("Reconcile() error = %v, want %v", err, wantCancel)
+	}
+	if rollbackCause != nil {
+		t.Fatalf("rollback inherited parent cancellation: %v", rollbackCause)
+	}
+	if result.Changed {
+		t.Fatalf("successful cleanup result = %#v, want Changed=false", result)
+	}
+}
+
+func TestEngineBoundsRollbackAndPreservesCleanupDeadline(t *testing.T) {
+	wantApplyErr := errors.New("apply failed")
+	adapter := &engineAdapter{
+		observe: constantObservation(1),
+		plan: func(context.Context, Desired[engineSpec], engineObserved) (Plan[engineAction], error) {
+			return Plan[engineAction]{Actions: []Action[engineAction]{
+				{ID: "a", Value: "A", Reversible: true},
+				{ID: "b", DependsOn: []ActionID{"a"}, Value: "B", Reversible: true},
+			}}, nil
+		},
+		apply: func(_ context.Context, action Action[engineAction]) (Undo[engineUndo], error) {
+			if action.ID == "b" {
+				return Undo[engineUndo]{}, wantApplyErr
+			}
+			return Undo[engineUndo]{Value: engineUndo(action.Value)}, nil
+		},
+		undo: func(ctx context.Context, _ Undo[engineUndo]) error {
+			<-ctx.Done()
+			return context.Cause(ctx)
+		},
+	}
+	policy := enginePolicy(1)
+	policy.RollbackTimeout = 10 * time.Millisecond
+
+	result, err := NewEngine(adapter, policy).Reconcile(context.Background(), engineDesired())
+	if !errors.Is(err, wantApplyErr) || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Reconcile() error = %v, want apply and cleanup deadline", err)
+	}
+	if !result.Changed {
+		t.Fatalf("timed-out rollback result = %#v, want Changed=true", result)
 	}
 }
 
