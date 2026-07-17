@@ -614,6 +614,51 @@ func TestManagerLaterCloseReturnsSelectedCauseBeforeActiveCallExits(t *testing.T
 	close(release)
 }
 
+func TestManagerWaitingCloseObservesSelectedShutdownCause(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	reconciler := reconcilerFunc[managerSpec, string](func(ctx context.Context, _ Desired[managerSpec]) (Result[string], error) {
+		close(started)
+		<-ctx.Done()
+		<-release
+		return Result[string]{}, context.Cause(ctx)
+	})
+	manager, err := NewManager(reconciler, 1, cloneManagerSpec)
+	if err != nil {
+		t.Fatalf("NewManager() error = %v", err)
+	}
+	manager.Submit(context.Background(), managerDesired("active", 1))
+	receiveSignal(t, started, "active reconciliation")
+
+	waitingClose := make(chan error, 1)
+	go func() { waitingClose <- manager.Close(context.Background()) }()
+	if _, err := awaitManagerFuture(t, manager.Submit(context.Background(), managerDesired("probe", 1))); !errors.Is(err, concurrency.ErrClosed) {
+		close(release)
+		t.Fatalf("post-close future error = %v, want ErrClosed", err)
+	}
+
+	shutdownCause := errors.New("shutdown expired")
+	shutdown, cancelShutdown := context.WithCancelCause(context.Background())
+	cancelShutdown(shutdownCause)
+	if err := manager.Close(shutdown); !errors.Is(err, shutdownCause) {
+		close(release)
+		t.Fatalf("deadline Close() error = %v, want shutdown cause", err)
+	}
+
+	select {
+	case err := <-waitingClose:
+		if !errors.Is(err, shutdownCause) {
+			close(release)
+			t.Fatalf("waiting Close() error = %v, want selected shutdown cause", err)
+		}
+	case <-time.After(time.Second):
+		close(release)
+		<-waitingClose
+		t.Fatal("waiting Close() did not observe the selected shutdown cause")
+	}
+	close(release)
+}
+
 func TestManagerSubmitContextOnlyControlsAdmission(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
