@@ -64,8 +64,9 @@ func TestValidatePlanRejectsInvalidReferences(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if err := ValidatePlan(test.plan); !errors.Is(err, test.want) {
-				t.Fatalf("ValidatePlan() error = %v, want %v", err, test.want)
+			err := ValidatePlan(test.plan)
+			if !errors.Is(err, ErrInvalidPlan) || !errors.Is(err, test.want) {
+				t.Fatalf("ValidatePlan() error = %v, want ErrInvalidPlan and %v", err, test.want)
 			}
 		})
 	}
