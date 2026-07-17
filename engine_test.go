@@ -215,11 +215,59 @@ func TestEngineJoinsRollbackErrorsAndDoesNotRetry(t *testing.T) {
 	if !errors.Is(err, wantApplyErr) || !errors.Is(err, wantUndoErr) {
 		t.Fatalf("Reconcile() error = %v, want apply and undo errors", err)
 	}
-	if len(applied) != 3 || len(clock.Delays()) != 0 {
-		t.Fatalf("unsafe retry occurred: applied=%v delays=%v", applied, clock.Delays())
+	if len(applied) != 3 || len(undone) != 2 || len(clock.Delays()) != 0 {
+		t.Fatalf("rollback/retry mismatch: applied=%v undone=%v delays=%v", applied, undone, clock.Delays())
 	}
 	if !result.Changed {
 		t.Fatalf("failed rollback result = %#v, want Changed=true", result)
+	}
+}
+
+func TestEngineRetriesAfterSuccessfulRollback(t *testing.T) {
+	wantTransient := Transient(errors.New("temporary apply failure"))
+	observations := 0
+	plans := 0
+	var applied []ActionID
+	var undone []ActionID
+	adapter := &engineAdapter{
+		observe: func(context.Context, Key) (engineObserved, error) {
+			observations++
+			return engineObserved(observations), nil
+		},
+		plan: func(context.Context, Desired[engineSpec], engineObserved) (Plan[engineAction], error) {
+			plans++
+			if plans > 1 {
+				return Plan[engineAction]{}, nil
+			}
+			return Plan[engineAction]{Actions: []Action[engineAction]{
+				{ID: "a", Value: "A", Reversible: true},
+				{ID: "b", DependsOn: []ActionID{"a"}, Value: "B", Reversible: true},
+			}}, nil
+		},
+		apply: func(_ context.Context, action Action[engineAction]) (Undo[engineUndo], error) {
+			applied = append(applied, action.ID)
+			if action.ID == "b" {
+				return Undo[engineUndo]{}, wantTransient
+			}
+			return Undo[engineUndo]{Value: "undo-a"}, nil
+		},
+		undo: func(_ context.Context, undo Undo[engineUndo]) error {
+			undone = append(undone, undo.ActionID)
+			return nil
+		},
+	}
+	clock := &recordingClock{immediate: true}
+	policy := Policy{MaxAttempts: 2, BaseDelay: time.Millisecond, MaxDelay: time.Millisecond}
+
+	result, err := NewEngine(adapter, policy, WithClock(clock)).Reconcile(context.Background(), engineDesired())
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if !slices.Equal(applied, []ActionID{"a", "b"}) || !slices.Equal(undone, []ActionID{"a"}) {
+		t.Fatalf("applied=%v undone=%v", applied, undone)
+	}
+	if plans != 2 || observations != 3 || result.Observed != 3 || result.Changed {
+		t.Fatalf("plans=%d observations=%d result=%#v", plans, observations, result)
 	}
 }
 

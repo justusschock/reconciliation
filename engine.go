@@ -1,0 +1,237 @@
+package reconciliation
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"reflect"
+	"time"
+)
+
+var (
+	// ErrNilAdapter identifies a nil or typed-nil engine adapter.
+	ErrNilAdapter = errors.New("reconciliation: nil adapter")
+	// ErrNilClock identifies a nil or typed-nil retry clock.
+	ErrNilClock = errors.New("reconciliation: nil clock")
+)
+
+// Clock supplies retry deadlines. After must return a non-nil channel.
+// Implementations must be safe for concurrent use by reconciliation calls.
+type Clock interface {
+	After(time.Duration) <-chan time.Time
+}
+
+// EngineOption configures an Engine.
+type EngineOption func(*engineConfig)
+
+// WithClock replaces the clock used for retry delays.
+func WithClock(clock Clock) EngineOption {
+	return func(config *engineConfig) {
+		config.clock = clock
+	}
+}
+
+type engineConfig struct {
+	clock Clock
+}
+
+// Engine executes validated action plans and rolls back completed reversible
+// actions when an attempt fails.
+type Engine[S, O, A, U any] struct {
+	adapter Adapter[S, O, A, U]
+	policy  Policy
+	clock   Clock
+}
+
+// NewEngine constructs a one-shot reconciliation engine.
+func NewEngine[S, O, A, U any](adapter Adapter[S, O, A, U], policy Policy, options ...EngineOption) *Engine[S, O, A, U] {
+	config := engineConfig{clock: systemClock{}}
+	for _, option := range options {
+		if option != nil {
+			option(&config)
+		}
+	}
+	return &Engine[S, O, A, U]{adapter: adapter, policy: policy, clock: config.clock}
+}
+
+// Reconcile observes, plans, validates, applies, and verifies one desired
+// value. A retry always starts with a fresh observation and plan.
+func (engine *Engine[S, O, A, U]) Reconcile(ctx context.Context, desired Desired[S]) (Result[O], error) {
+	result := Result[O]{Key: desired.Key, Generation: desired.Generation}
+	if err := desired.Validate(); err != nil {
+		return result, err
+	}
+	if err := engine.policy.Validate(); err != nil {
+		return result, err
+	}
+	if isNilInterface(engine.adapter) {
+		return result, ErrNilAdapter
+	}
+	if isNilInterface(engine.clock) {
+		return result, ErrNilClock
+	}
+	if err := context.Cause(ctx); err != nil {
+		return result, err
+	}
+
+	var lastErr error
+	for attempt := 1; attempt <= engine.policy.MaxAttempts; attempt++ {
+		attemptContext := ctx
+		cancelAttempt := func() {}
+		if engine.policy.AttemptTimeout > 0 {
+			attemptContext, cancelAttempt = context.WithTimeout(ctx, engine.policy.AttemptTimeout)
+		}
+
+		attemptResult, attemptErr, retrySafe := engine.runAttempt(attemptContext, ctx, desired, attempt)
+		cancelAttempt()
+		if attemptErr == nil {
+			return attemptResult, nil
+		}
+		lastErr = attemptErr
+		result = attemptResult
+		decision := engine.policy.Decide(attempt, attemptErr)
+		if !retrySafe || !decision.Retry {
+			return result, attemptErr
+		}
+		if err := engine.waitForRetry(ctx, decision.Delay); err != nil {
+			return result, err
+		}
+	}
+
+	return result, lastErr
+}
+
+type completedAction[U any] struct {
+	id         ActionID
+	reversible bool
+	undo       Undo[U]
+}
+
+func (engine *Engine[S, O, A, U]) runAttempt(
+	attemptContext context.Context,
+	rollbackContext context.Context,
+	desired Desired[S],
+	attempt int,
+) (Result[O], error, bool) {
+	result := Result[O]{Key: desired.Key, Generation: desired.Generation}
+
+	observed, observeErr := engine.adapter.Observe(attemptContext, desired.Key)
+	result.Observed = observed
+	if err := operationError(attemptContext, observeErr); err != nil {
+		return result, fmt.Errorf("reconciliation: observe attempt %d: %w", attempt, err), true
+	}
+
+	plan, planErr := engine.adapter.Plan(attemptContext, desired, observed)
+	if err := operationError(attemptContext, planErr); err != nil {
+		return result, fmt.Errorf("reconciliation: plan attempt %d: %w", attempt, err), true
+	}
+	ordered, err := Ordered(plan)
+	if err != nil {
+		return result, fmt.Errorf("reconciliation: validate attempt %d: %w", attempt, err), true
+	}
+
+	completed := make([]completedAction[U], 0, len(ordered))
+	for _, action := range ordered {
+		if err := context.Cause(attemptContext); err != nil {
+			return engine.failAttempt(rollbackContext, result, completed, fmt.Errorf("reconciliation: apply action %s: %w", formatActionID(action.ID), err))
+		}
+		undo, applyErr := engine.adapter.Apply(attemptContext, action)
+		if applyErr != nil {
+			err := operationError(attemptContext, applyErr)
+			return engine.failAttempt(rollbackContext, result, completed, fmt.Errorf("reconciliation: apply action %s: %w", formatActionID(action.ID), err))
+		}
+		undo.ActionID = action.ID
+		completed = append(completed, completedAction[U]{id: action.ID, reversible: action.Reversible, undo: undo})
+		if err := context.Cause(attemptContext); err != nil {
+			return engine.failAttempt(rollbackContext, result, completed, fmt.Errorf("reconciliation: apply action %s: %w", formatActionID(action.ID), err))
+		}
+	}
+
+	finalObserved, finalObserveErr := engine.adapter.Observe(attemptContext, desired.Key)
+	if err := operationError(attemptContext, finalObserveErr); err != nil {
+		return engine.failAttempt(rollbackContext, result, completed, fmt.Errorf("reconciliation: verify attempt %d: %w", attempt, err))
+	}
+	result.Observed = finalObserved
+	result.Changed = len(completed) > 0
+	return result, nil, true
+}
+
+func (engine *Engine[S, O, A, U]) failAttempt(
+	ctx context.Context,
+	result Result[O],
+	completed []completedAction[U],
+	primary error,
+) (Result[O], error, bool) {
+	rollbackErr, residualChange := engine.rollback(ctx, completed)
+	result.Changed = residualChange
+	if rollbackErr != nil {
+		return result, errors.Join(primary, rollbackErr), false
+	}
+	return result, primary, true
+}
+
+func (engine *Engine[S, O, A, U]) rollback(ctx context.Context, completed []completedAction[U]) (error, bool) {
+	rollbackErrors := make([]error, 0)
+	residualChange := false
+	for index := len(completed) - 1; index >= 0; index-- {
+		action := completed[index]
+		if !action.reversible {
+			residualChange = true
+			continue
+		}
+		if err := engine.adapter.Undo(ctx, action.undo); err != nil {
+			residualChange = true
+			rollbackErrors = append(rollbackErrors, fmt.Errorf("reconciliation: undo action %s: %w", formatActionID(action.id), err))
+		}
+	}
+	return errors.Join(rollbackErrors...), residualChange
+}
+
+func (engine *Engine[S, O, A, U]) waitForRetry(ctx context.Context, delay time.Duration) error {
+	if err := context.Cause(ctx); err != nil {
+		return err
+	}
+	if delay <= 0 {
+		return nil
+	}
+	deadline := engine.clock.After(delay)
+	if deadline == nil {
+		return ErrNilClock
+	}
+	select {
+	case <-ctx.Done():
+		return context.Cause(ctx)
+	case <-deadline:
+		return nil
+	}
+}
+
+func operationError(ctx context.Context, operationErr error) error {
+	contextErr := context.Cause(ctx)
+	if operationErr == nil {
+		return contextErr
+	}
+	if contextErr == nil || errors.Is(operationErr, contextErr) {
+		return operationErr
+	}
+	return errors.Join(operationErr, contextErr)
+}
+
+func isNilInterface(value any) bool {
+	if value == nil {
+		return true
+	}
+	reflected := reflect.ValueOf(value)
+	switch reflected.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return reflected.IsNil()
+	default:
+		return false
+	}
+}
+
+type systemClock struct{}
+
+func (systemClock) After(delay time.Duration) <-chan time.Time {
+	return time.After(delay)
+}
