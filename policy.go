@@ -14,13 +14,19 @@ var (
 	ErrConflict      = errors.New("reconciliation: conflict error")
 )
 
+// DefaultRollbackTimeout bounds best-effort cleanup when Policy does not set
+// RollbackTimeout or AttemptTimeout.
+const DefaultRollbackTimeout = 30 * time.Second
+
 // Policy bounds retry attempts, timeouts, and backoff.
 type Policy struct {
-	MaxAttempts    int
-	BaseDelay      time.Duration
-	MaxDelay       time.Duration
-	AttemptTimeout time.Duration
-	Jitter         func(time.Duration) time.Duration
+	MaxAttempts     int
+	BaseDelay       time.Duration
+	MaxDelay        time.Duration
+	AttemptTimeout  time.Duration
+	RollbackTimeout time.Duration
+	// Jitter may be called concurrently by Reconcile calls on the same Engine.
+	Jitter func(time.Duration) time.Duration
 }
 
 // Decision reports whether another attempt should run and after what delay.
@@ -42,10 +48,23 @@ func (policy Policy) Validate() error {
 	if policy.AttemptTimeout < 0 {
 		return fmt.Errorf("%w: negative attempt timeout", ErrInvalidPolicy)
 	}
+	if policy.RollbackTimeout < 0 {
+		return fmt.Errorf("%w: negative rollback timeout", ErrInvalidPolicy)
+	}
 	if policy.MaxDelay < policy.BaseDelay {
 		return fmt.Errorf("%w: max delay is below base delay", ErrInvalidPolicy)
 	}
 	return nil
+}
+
+func (policy Policy) rollbackTimeout() time.Duration {
+	if policy.RollbackTimeout > 0 {
+		return policy.RollbackTimeout
+	}
+	if policy.AttemptTimeout > 0 {
+		return policy.AttemptTimeout
+	}
+	return DefaultRollbackTimeout
 }
 
 func (policy Policy) Decide(attempt int, err error) Decision {

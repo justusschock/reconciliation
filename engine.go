@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"time"
 )
 
@@ -36,7 +37,9 @@ type engineConfig struct {
 }
 
 // Engine executes validated action plans and rolls back completed reversible
-// actions when an attempt fails.
+// actions when an attempt fails. Engine does not serialize Reconcile calls;
+// callers that share an Engine must satisfy the Adapter, Clock, and Jitter
+// concurrency contracts and serialize calls by key when required.
 type Engine[S, O, A, U any] struct {
 	adapter Adapter[S, O, A, U]
 	policy  Policy
@@ -75,6 +78,7 @@ func (engine *Engine[S, O, A, U]) Reconcile(ctx context.Context, desired Desired
 	}
 
 	var lastErr error
+	residualChange := false
 	for attempt := 1; attempt <= engine.policy.MaxAttempts; attempt++ {
 		attemptContext := ctx
 		cancelAttempt := func() {}
@@ -84,6 +88,8 @@ func (engine *Engine[S, O, A, U]) Reconcile(ctx context.Context, desired Desired
 
 		attemptResult, attemptErr, retrySafe := engine.runAttempt(attemptContext, ctx, desired, attempt)
 		cancelAttempt()
+		residualChange = residualChange || attemptResult.Changed
+		attemptResult.Changed = residualChange
 		if attemptErr == nil {
 			return attemptResult, nil
 		}
@@ -103,6 +109,7 @@ func (engine *Engine[S, O, A, U]) Reconcile(ctx context.Context, desired Desired
 
 type completedAction[U any] struct {
 	id         ActionID
+	dependsOn  []ActionID
 	reversible bool
 	undo       Undo[U]
 }
@@ -135,13 +142,19 @@ func (engine *Engine[S, O, A, U]) runAttempt(
 		if err := context.Cause(attemptContext); err != nil {
 			return engine.failAttempt(rollbackContext, result, completed, fmt.Errorf("reconciliation: apply action %s: %w", formatActionID(action.ID), err))
 		}
+		dependencies := slices.Clone(action.DependsOn)
 		undo, applyErr := engine.adapter.Apply(attemptContext, action)
 		if applyErr != nil {
 			err := operationError(attemptContext, applyErr)
 			return engine.failAttempt(rollbackContext, result, completed, fmt.Errorf("reconciliation: apply action %s: %w", formatActionID(action.ID), err))
 		}
 		undo.ActionID = action.ID
-		completed = append(completed, completedAction[U]{id: action.ID, reversible: action.Reversible, undo: undo})
+		completed = append(completed, completedAction[U]{
+			id:         action.ID,
+			dependsOn:  dependencies,
+			reversible: action.Reversible,
+			undo:       undo,
+		})
 		if err := context.Cause(attemptContext); err != nil {
 			return engine.failAttempt(rollbackContext, result, completed, fmt.Errorf("reconciliation: apply action %s: %w", formatActionID(action.ID), err))
 		}
@@ -157,12 +170,21 @@ func (engine *Engine[S, O, A, U]) runAttempt(
 }
 
 func (engine *Engine[S, O, A, U]) failAttempt(
-	ctx context.Context,
+	parentContext context.Context,
 	result Result[O],
 	completed []completedAction[U],
 	primary error,
 ) (Result[O], error, bool) {
-	rollbackErr, residualChange := engine.rollback(ctx, completed)
+	if len(completed) == 0 {
+		return result, primary, true
+	}
+	rollbackContext, cancelRollback := context.WithTimeout(
+		context.WithoutCancel(parentContext),
+		engine.policy.rollbackTimeout(),
+	)
+	defer cancelRollback()
+
+	rollbackErr, residualChange := engine.rollback(rollbackContext, completed)
 	result.Changed = residualChange
 	if rollbackErr != nil {
 		return result, errors.Join(primary, rollbackErr), false
@@ -171,20 +193,57 @@ func (engine *Engine[S, O, A, U]) failAttempt(
 }
 
 func (engine *Engine[S, O, A, U]) rollback(ctx context.Context, completed []completedAction[U]) (error, bool) {
+	byID := make(map[ActionID]completedAction[U], len(completed))
+	for _, action := range completed {
+		byID[action.id] = action
+	}
+	retained := make(map[ActionID]struct{})
 	rollbackErrors := make([]error, 0)
-	residualChange := false
+	contextReported := false
 	for index := len(completed) - 1; index >= 0; index-- {
 		action := completed[index]
-		if !action.reversible {
-			residualChange = true
+		if _, keep := retained[action.id]; keep {
 			continue
 		}
-		if err := engine.adapter.Undo(ctx, action.undo); err != nil {
-			residualChange = true
+		if !action.reversible {
+			retainDependencyClosure(action.id, byID, retained)
+			continue
+		}
+		if contextErr := context.Cause(ctx); contextErr != nil {
+			retainDependencyClosure(action.id, byID, retained)
+			if !contextReported {
+				rollbackErrors = append(rollbackErrors, fmt.Errorf("reconciliation: rollback context: %w", contextErr))
+				contextReported = true
+			}
+			continue
+		}
+		if err := operationError(ctx, engine.adapter.Undo(ctx, action.undo)); err != nil {
+			retainDependencyClosure(action.id, byID, retained)
 			rollbackErrors = append(rollbackErrors, fmt.Errorf("reconciliation: undo action %s: %w", formatActionID(action.id), err))
+			if context.Cause(ctx) != nil {
+				contextReported = true
+			}
 		}
 	}
-	return errors.Join(rollbackErrors...), residualChange
+	return errors.Join(rollbackErrors...), len(retained) > 0
+}
+
+func retainDependencyClosure[U any](
+	id ActionID,
+	completed map[ActionID]completedAction[U],
+	retained map[ActionID]struct{},
+) {
+	if _, exists := retained[id]; exists {
+		return
+	}
+	retained[id] = struct{}{}
+	action, exists := completed[id]
+	if !exists {
+		return
+	}
+	for _, dependency := range action.dependsOn {
+		retainDependencyClosure(dependency, completed, retained)
+	}
 }
 
 func (engine *Engine[S, O, A, U]) waitForRetry(ctx context.Context, delay time.Duration) error {

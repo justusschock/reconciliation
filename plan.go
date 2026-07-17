@@ -29,7 +29,9 @@ var (
 // ActionID identifies one action within a plan.
 type ActionID string
 
-// Action is one planned mutation. Value ownership is shallow.
+// Action is one planned mutation. DependsOn identifies runtime prerequisites,
+// not only apply-order hints: rollback retains the transitive dependencies of
+// any completed action that cannot be undone. Value ownership is shallow.
 type Action[A any] struct {
 	ID         ActionID
 	DependsOn  []ActionID
