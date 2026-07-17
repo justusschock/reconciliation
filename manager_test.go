@@ -575,6 +575,45 @@ func TestManagerConcurrentCloseDeadlinesUseOneShutdownCause(t *testing.T) {
 	}
 }
 
+func TestManagerLaterCloseReturnsSelectedCauseBeforeActiveCallExits(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	reconciler := reconcilerFunc[managerSpec, string](func(ctx context.Context, _ Desired[managerSpec]) (Result[string], error) {
+		close(started)
+		<-ctx.Done()
+		<-release
+		return Result[string]{}, context.Cause(ctx)
+	})
+	manager, err := NewManager(reconciler, 1, cloneManagerSpec)
+	if err != nil {
+		t.Fatalf("NewManager() error = %v", err)
+	}
+	manager.Submit(context.Background(), managerDesired("active", 1))
+	receiveSignal(t, started, "active reconciliation")
+
+	shutdownCause := errors.New("shutdown expired")
+	shutdown, cancelShutdown := context.WithCancelCause(context.Background())
+	cancelShutdown(shutdownCause)
+	if err := manager.Close(shutdown); !errors.Is(err, shutdownCause) {
+		t.Fatalf("Close() error = %v, want shutdown cause", err)
+	}
+
+	closedAgain := make(chan error, 1)
+	go func() { closedAgain <- manager.Close(context.Background()) }()
+	select {
+	case err := <-closedAgain:
+		if !errors.Is(err, shutdownCause) {
+			close(release)
+			t.Fatalf("second Close() error = %v, want original shutdown cause", err)
+		}
+	case <-time.After(time.Second):
+		close(release)
+		<-closedAgain
+		t.Fatal("second Close() blocked until the active reconciliation exited")
+	}
+	close(release)
+}
+
 func TestManagerSubmitContextOnlyControlsAdmission(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
