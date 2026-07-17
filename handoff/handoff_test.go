@@ -161,6 +161,66 @@ func TestHandoffRoundTripIsCanonicalAndStateOnly(t *testing.T) {
 	}
 }
 
+func TestExportOwnsEachCodecBufferBeforeMarshalingTheNextSpec(t *testing.T) {
+	scratch := make([]byte, len("first"))
+	exporter, err := NewExporter[[]byte](codecFuncs[[]byte]{
+		marshal: func(value []byte) ([]byte, error) {
+			copy(scratch, value)
+			return scratch[:len(value)], nil
+		},
+		unmarshal: func(data []byte) ([]byte, error) {
+			return bytes.Clone(data), nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifact, err := exporter.Export(context.Background(), []Pending[[]byte]{
+		{Desired: reconciliation.Desired[[]byte]{Key: "alpha", Generation: 1, Spec: []byte("first")}},
+		{Desired: reconciliation.Desired[[]byte]{Key: "beta", Generation: 1, Spec: []byte("other")}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var encoded testDocument
+	if err := json.Unmarshal(artifact.Data, &encoded); err != nil {
+		t.Fatal(err)
+	}
+	if got := string(encoded.Pending[0].Spec); got != "first" {
+		t.Fatalf("first encoded spec = %q, want %q", got, "first")
+	}
+	if got := string(encoded.Pending[1].Spec); got != "other" {
+		t.Fatalf("second encoded spec = %q, want %q", got, "other")
+	}
+}
+
+func TestAdoptedCodecBytesDoNotAliasArtifactData(t *testing.T) {
+	adopter, err := NewAdopter[[]byte](codecFuncs[[]byte]{
+		marshal: func(value []byte) ([]byte, error) {
+			return bytes.Clone(value), nil
+		},
+		unmarshal: func(data []byte) ([]byte, error) {
+			return data, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifact := mustArtifact(t, mustDocumentData(t, []testEncodedPending{{
+		Key: "alpha", Generation: 1, Spec: []byte("state"),
+	}}))
+	adopted, err := adopter.Adopt(context.Background(), artifact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index := range artifact.Data {
+		artifact.Data[index] = 0
+	}
+	if got := string(adopted[0].Desired.Spec); got != "state" {
+		t.Fatalf("adopted spec after artifact mutation = %q, want %q", got, "state")
+	}
+}
+
 func TestConstructorsRejectNilCodecs(t *testing.T) {
 	var nilCodec Codec[testSpec]
 	var typedNil *pointerCodec
