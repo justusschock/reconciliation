@@ -324,16 +324,13 @@ func (manager *Manager[S, O]) Close(ctx context.Context) error {
 	default:
 	}
 	if err := context.Cause(ctx); err != nil {
-		manager.abort(err)
-		return err
+		return manager.abort(err)
 	}
 	select {
 	case <-done:
 		return manager.closeError()
 	case <-ctx.Done():
-		err := context.Cause(ctx)
-		manager.abort(err)
-		return err
+		return manager.abort(context.Cause(ctx))
 	}
 }
 
@@ -452,12 +449,20 @@ func (manager *Manager[S, O]) waitUntilReady(work *managerWork[S, O], deadline <
 	}
 }
 
-func (manager *Manager[S, O]) abort(cause error) {
-	manager.cancel(cause)
+func (manager *Manager[S, O]) abort(cause error) error {
 	manager.mu.Lock()
-	if manager.closeErr == nil {
-		manager.closeErr = cause
+	if manager.closeErr != nil {
+		selected := manager.closeErr
+		manager.mu.Unlock()
+		return selected
 	}
+	if manager.active == 0 {
+		manager.finishCloseLocked()
+		manager.mu.Unlock()
+		return nil
+	}
+	manager.closeErr = cause
+	manager.cancel(cause)
 	active := make([]*managerWork[S, O], 0, manager.active)
 	for _, state := range manager.states {
 		if state.active != nil {
@@ -469,6 +474,7 @@ func (manager *Manager[S, O]) abort(cause error) {
 	for _, work := range active {
 		resolveManagerWaiters(work.waiters, Result[O]{}, cause)
 	}
+	return cause
 }
 
 func (manager *Manager[S, O]) finishCloseLocked() {
