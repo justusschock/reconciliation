@@ -5,8 +5,10 @@ import (
 	"errors"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 type adapterSpec struct{}
@@ -96,6 +98,26 @@ func TestValidatePlanReportsSelfCycle(t *testing.T) {
 	}
 }
 
+func TestValidatePlanEscapesUnsafeCycleIDs(t *testing.T) {
+	unsafe := ActionID("line\nbreak -> next")
+	invalidUTF8 := ActionID(string([]byte{'b', 'a', 'd', 0xff}))
+	err := ValidatePlan(Plan[string]{Actions: []Action[string]{
+		{ID: unsafe, DependsOn: []ActionID{invalidUTF8}},
+		{ID: invalidUTF8, DependsOn: []ActionID{unsafe}},
+	}})
+	if !errors.Is(err, ErrPlanCycle) {
+		t.Fatalf("ValidatePlan() error = %v, want ErrPlanCycle", err)
+	}
+	if !utf8.ValidString(err.Error()) || strings.Contains(err.Error(), "line\nbreak") {
+		t.Fatalf("ValidatePlan() emitted unsafe diagnostics %q", err)
+	}
+	for _, id := range []ActionID{unsafe, invalidUTF8} {
+		if !strings.Contains(err.Error(), strconv.QuoteToASCII(string(id))) {
+			t.Fatalf("ValidatePlan() error = %q, want escaped ID %s", err, strconv.QuoteToASCII(string(id)))
+		}
+	}
+}
+
 func TestOrderedUsesStableTopologicalOrder(t *testing.T) {
 	plan := Plan[string]{Actions: []Action[string]{
 		{ID: "publish", DependsOn: []ActionID{"compile", "lint"}},
@@ -120,13 +142,15 @@ func TestOrderedUsesStableTopologicalOrder(t *testing.T) {
 }
 
 func TestOrderedDoesNotAliasOrMutateInput(t *testing.T) {
-	dependencies := []ActionID{"a"}
+	dependencies := []ActionID{"b", "a"}
 	plan := Plan[int]{Actions: []Action[int]{
-		{ID: "b", DependsOn: dependencies, Value: 2},
+		{ID: "c", DependsOn: dependencies, Value: 3},
+		{ID: "b", Value: 2},
 		{ID: "a", Value: 1},
 	}}
 	want := Plan[int]{Actions: []Action[int]{
-		{ID: "b", DependsOn: []ActionID{"a"}, Value: 2},
+		{ID: "c", DependsOn: []ActionID{"b", "a"}, Value: 3},
+		{ID: "b", Value: 2},
 		{ID: "a", Value: 1},
 	}}
 
@@ -138,9 +162,12 @@ func TestOrderedDoesNotAliasOrMutateInput(t *testing.T) {
 		t.Fatalf("Ordered() mutated input: got %#v, want %#v", plan, want)
 	}
 
-	got[1].DependsOn[0] = "changed"
-	if dependencies[0] != "a" {
-		t.Fatalf("Ordered() result aliases input dependencies: %q", dependencies[0])
+	if !slices.Equal(got[2].DependsOn, []ActionID{"a", "b"}) {
+		t.Fatalf("Ordered() dependencies = %v, want canonical order", got[2].DependsOn)
+	}
+	got[2].DependsOn[0] = "changed"
+	if !slices.Equal(dependencies, []ActionID{"b", "a"}) {
+		t.Fatalf("Ordered() result aliases input dependencies: %v", dependencies)
 	}
 }
 
