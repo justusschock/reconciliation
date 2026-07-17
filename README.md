@@ -28,6 +28,9 @@ remote transport, or a daemon. Adapters own the side effects and domain types.
 
 ## Install the private module
 
+Version `v0.2.0` requires Go 1.22 or newer. It resolves both private sibling
+modules, `go-concurrency` and `go-lifecycle`, at `v0.2.0`.
+
 You need access to this repository and its private dependencies. Configure a
 Git credential helper or SSH agent; do not place access tokens in Git URLs,
 source files, `go env`, or shell history. GitHub CLI can configure Git's
@@ -43,7 +46,7 @@ Tell Go that the module family is private, then install it:
 ```bash
 go env -w GOPRIVATE='github.com/justusschock/*'
 go env -w GONOSUMDB='github.com/justusschock/*'
-go get github.com/justusschock/go-reconciliation@latest
+go get github.com/justusschock/go-reconciliation@v0.2.0
 ```
 
 ## Build and order an action DAG

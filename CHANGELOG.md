@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.2.0 - 2026-07-17
 
 - Add generic desired, observed, condition, action, undo, and result contracts.
 - Validate arbitrary action dependency DAGs and produce deterministic
@@ -17,3 +17,5 @@
   planned actions, running work, resource rights, or runtime errors.
 - Define codec buffer/value ownership and add compile-checked DAG, manager, and
   handoff examples.
+- Support Go 1.22 and test Go 1.22 through Go 1.26 in GitHub Actions.
+- Require `go-concurrency` and `go-lifecycle` at `v0.2.0`.
