@@ -49,6 +49,15 @@ func WithManagerClock(clock ManagerClock) ManagerOption {
 
 type managerConfig struct {
 	clock ManagerClock
+	sink  StatusSink
+}
+
+// WithManagerStatusSink publishes queued work and carries sink into Reconciler
+// calls. Engine reads the sink from that per-call context.
+func WithManagerStatusSink(sink StatusSink) ManagerOption {
+	return func(config *managerConfig) {
+		config.sink = sink
+	}
 }
 
 // Pending describes accepted work that has not started. Desired.Spec is cloned
@@ -66,6 +75,7 @@ type Manager[S, O any] struct {
 	cloneSpec  CloneSpec[S]
 	limit      int
 	clock      ManagerClock
+	sink       StatusSink
 
 	ctx    context.Context
 	cancel context.CancelCauseFunc
@@ -163,6 +173,7 @@ func NewManager[S, O any](
 		cloneSpec:  cloneSpec,
 		limit:      limit,
 		clock:      config.clock,
+		sink:       config.sink,
 		ctx:        ctx,
 		cancel:     cancel,
 		states:     make(map[Key]*managerKeyState[S, O]),
@@ -172,7 +183,9 @@ func NewManager[S, O any](
 
 // Submit validates and clones desired before acceptance. Invalid, closed,
 // canceled, stale, and superseded submissions are represented by failed
-// futures; Submit never returns a nil future.
+// futures; Submit never returns a nil future. Coalesced futures own independent
+// Conditions slices, while Result.Observed ownership remains deliberately
+// shallow.
 func (manager *Manager[S, O]) Submit(ctx context.Context, desired Desired[S]) *concurrency.Future[Result[O]] {
 	if err := desired.Validate(); err != nil {
 		return concurrency.Failed[Result[O]](err)
@@ -211,11 +224,14 @@ func (manager *Manager[S, O]) Submit(ctx context.Context, desired Desired[S]) *c
 		if state.active != nil && state.active.desired.Generation == owned.Generation {
 			state.active.waiters = append(state.active.waiters, waiter)
 			manager.mu.Unlock()
+			manager.publish(owned, StatusQueued, 0, nil)
 			return future
 		}
 		if state.pending != nil && state.pending.desired.Generation == owned.Generation {
 			state.pending.waiters = append(state.pending.waiters, waiter)
 			manager.mu.Unlock()
+			manager.publish(owned, StatusQueued, 0, nil)
+			manager.startReady()
 			return future
 		}
 	}
@@ -229,9 +245,8 @@ func (manager *Manager[S, O]) Submit(ctx context.Context, desired Desired[S]) *c
 			state.pending = nil
 		}
 	}
-	work := &managerWork[S, O]{desired: owned, waiters: []*managerWaiter[O]{waiter}, ready: true}
+	work := &managerWork[S, O]{desired: owned, waiters: []*managerWaiter[O]{waiter}}
 	state.pending = work
-	manager.startReadyLocked()
 	manager.mu.Unlock()
 
 	if superseded != nil {
@@ -241,6 +256,8 @@ func (manager *Manager[S, O]) Submit(ctx context.Context, desired Desired[S]) *c
 			supersededGenerationError(owned.Key, superseded.desired.Generation, owned.Generation),
 		)
 	}
+	manager.publish(owned, StatusQueued, 0, nil)
+	manager.startQueuedWork(work)
 	return future
 }
 
@@ -348,14 +365,34 @@ func (manager *Manager[S, O]) startReadyLocked() {
 	}
 }
 
+func (manager *Manager[S, O]) startReady() {
+	manager.mu.Lock()
+	if !manager.closed {
+		manager.startReadyLocked()
+	}
+	manager.mu.Unlock()
+}
+
+func (manager *Manager[S, O]) startQueuedWork(work *managerWork[S, O]) {
+	manager.mu.Lock()
+	state := manager.states[work.desired.Key]
+	if !manager.closed && state != nil && state.pending == work {
+		work.ready = true
+		manager.startReadyLocked()
+	}
+	manager.mu.Unlock()
+}
+
 func (manager *Manager[S, O]) run(work *managerWork[S, O]) {
 	desired := manager.cloneDesired(work.desired)
-	result, err := manager.reconciler.Reconcile(manager.ctx, desired)
+	ctx := WithStatusSink(manager.ctx, manager.sink)
+	result, err := manager.reconciler.Reconcile(ctx, desired)
 	manager.complete(work, result, err)
 }
 
 func (manager *Manager[S, O]) complete(work *managerWork[S, O], result Result[O], reconcileErr error) {
 	resolve := true
+	requeued := false
 	var timerChannel <-chan time.Time
 	manager.mu.Lock()
 	state := manager.states[work.desired.Key]
@@ -377,6 +414,7 @@ func (manager *Manager[S, O]) complete(work *managerWork[S, O], result Result[O]
 		} else {
 			state.pending = work
 			resolve = false
+			requeued = true
 		}
 	}
 
@@ -390,6 +428,9 @@ func (manager *Manager[S, O]) complete(work *managerWork[S, O], result Result[O]
 	if resolve {
 		resolveManagerWaiters(work.waiters, result, reconcileErr)
 		return
+	}
+	if requeued {
+		manager.publish(work.desired, StatusRetrying, 0, nil)
 	}
 	go manager.waitUntilReady(work, timerChannel)
 }
@@ -450,6 +491,19 @@ func resolveManagerWaiters[O any](waiters []*managerWaiter[O], result Result[O],
 
 func supersededGenerationError(key Key, generation, latest Generation) error {
 	return fmt.Errorf("%w: key %q generation %d was replaced by generation %d", ErrSuperseded, key, generation, latest)
+}
+
+func (manager *Manager[S, O]) publish(desired Desired[S], phase StatusPhase, attempt int, err error) {
+	if isNilInterface(manager.sink) {
+		return
+	}
+	manager.sink.Publish(StatusEvent{
+		Key:        desired.Key,
+		Generation: desired.Generation,
+		Phase:      phase,
+		Attempt:    attempt,
+		Err:        err,
+	})
 }
 
 type systemManagerClock struct{}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -175,6 +176,52 @@ func TestManagerPublishesQueuedBeforeEnginePhases(t *testing.T) {
 	want := []StatusPhase{StatusQueued, StatusObserving, StatusPlanning, StatusObserving, StatusSucceeded}
 	if got := statusPhases(sink.Events()); !slices.Equal(got, want) {
 		t.Fatalf("status phases = %v, want %v", got, want)
+	}
+}
+
+func TestManagerDoesNotStartBeforeInitialQueuedPublicationCompletes(t *testing.T) {
+	sink := &gatedQueuedSink{entered: make(chan struct{}), release: make(chan struct{})}
+	reconciler := reconcilerFunc[managerSpec, string](func(_ context.Context, desired Desired[managerSpec]) (Result[string], error) {
+		return managerResult(desired, "done"), nil
+	})
+	manager, err := NewManager(reconciler, 1, cloneManagerSpec, WithManagerStatusSink(sink))
+	if err != nil {
+		t.Fatalf("NewManager() error = %v", err)
+	}
+	firstSubmitted := make(chan *concurrency.Future[Result[string]], 1)
+	go func() {
+		firstSubmitted <- manager.Submit(context.Background(), managerDesired("target", 1))
+	}()
+	receiveSignal(t, sink.entered, "initial queued publication")
+	second := manager.Submit(context.Background(), managerDesired("target", 1))
+	if pending := manager.Pending(); len(pending) != 1 {
+		t.Fatalf("Pending() length = %d, want work held until initial queued publication completes", len(pending))
+	}
+	close(sink.release)
+	first := receiveManagerCall(t, firstSubmitted)
+	for name, future := range map[string]*concurrency.Future[Result[string]]{"first": first, "second": second} {
+		if _, err := awaitManagerFuture(t, future); err != nil {
+			t.Fatalf("%s future error = %v", name, err)
+		}
+	}
+	if err := manager.Close(context.Background()); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+}
+
+type gatedQueuedSink struct {
+	entered chan struct{}
+	release chan struct{}
+	claimed atomic.Bool
+}
+
+func (sink *gatedQueuedSink) Publish(event StatusEvent) {
+	if event.Phase != StatusQueued {
+		return
+	}
+	if sink.claimed.CompareAndSwap(false, true) {
+		close(sink.entered)
+		<-sink.release
 	}
 }
 

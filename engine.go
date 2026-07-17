@@ -59,8 +59,22 @@ func NewEngine[S, O, A, U any](adapter Adapter[S, O, A, U], policy Policy, optio
 
 // Reconcile observes, plans, validates, applies, and verifies one desired
 // value. A retry always starts with a fresh observation and plan.
-func (engine *Engine[S, O, A, U]) Reconcile(ctx context.Context, desired Desired[S]) (Result[O], error) {
-	result := Result[O]{Key: desired.Key, Generation: desired.Generation}
+func (engine *Engine[S, O, A, U]) Reconcile(ctx context.Context, desired Desired[S]) (result Result[O], reconcileErr error) {
+	result = Result[O]{Key: desired.Key, Generation: desired.Generation}
+	attemptNumber := 0
+	defer func() {
+		phase := StatusSucceeded
+		if reconcileErr != nil {
+			phase = StatusFailed
+		}
+		publishStatus(ctx, StatusEvent{
+			Key:        desired.Key,
+			Generation: desired.Generation,
+			Phase:      phase,
+			Attempt:    attemptNumber,
+			Err:        reconcileErr,
+		})
+	}()
 	if err := desired.Validate(); err != nil {
 		return result, err
 	}
@@ -80,6 +94,7 @@ func (engine *Engine[S, O, A, U]) Reconcile(ctx context.Context, desired Desired
 	var lastErr error
 	residualChange := false
 	for attempt := 1; attempt <= engine.policy.MaxAttempts; attempt++ {
+		attemptNumber = attempt
 		attemptContext := ctx
 		cancelAttempt := func() {}
 		if engine.policy.AttemptTimeout > 0 {
@@ -99,6 +114,13 @@ func (engine *Engine[S, O, A, U]) Reconcile(ctx context.Context, desired Desired
 		if !retrySafe || !decision.Retry {
 			return result, attemptErr
 		}
+		publishStatus(ctx, StatusEvent{
+			Key:        desired.Key,
+			Generation: desired.Generation,
+			Phase:      StatusRetrying,
+			Attempt:    attempt,
+			Err:        attemptErr,
+		})
 		if err := engine.waitForRetry(ctx, decision.Delay); err != nil {
 			return result, err
 		}
@@ -122,12 +144,18 @@ func (engine *Engine[S, O, A, U]) runAttempt(
 ) (Result[O], error, bool) {
 	result := Result[O]{Key: desired.Key, Generation: desired.Generation}
 
+	publishStatus(attemptContext, StatusEvent{
+		Key: desired.Key, Generation: desired.Generation, Phase: StatusObserving, Attempt: attempt,
+	})
 	observed, observeErr := engine.adapter.Observe(attemptContext, desired.Key)
 	result.Observed = observed
 	if err := operationError(attemptContext, observeErr); err != nil {
 		return result, fmt.Errorf("reconciliation: observe attempt %d: %w", attempt, err), true
 	}
 
+	publishStatus(attemptContext, StatusEvent{
+		Key: desired.Key, Generation: desired.Generation, Phase: StatusPlanning, Attempt: attempt,
+	})
 	plan, planErr := engine.adapter.Plan(attemptContext, desired, observed)
 	if err := operationError(attemptContext, planErr); err != nil {
 		return result, fmt.Errorf("reconciliation: plan attempt %d: %w", attempt, err), true
@@ -140,13 +168,16 @@ func (engine *Engine[S, O, A, U]) runAttempt(
 	completed := make([]completedAction[U], 0, len(ordered))
 	for _, action := range ordered {
 		if err := context.Cause(attemptContext); err != nil {
-			return engine.failAttempt(rollbackContext, result, completed, fmt.Errorf("reconciliation: apply action %s: %w", formatActionID(action.ID), err))
+			return engine.failAttempt(rollbackContext, result, completed, attempt, fmt.Errorf("reconciliation: apply action %s: %w", formatActionID(action.ID), err))
 		}
 		dependencies := slices.Clone(action.DependsOn)
+		publishStatus(attemptContext, StatusEvent{
+			Key: desired.Key, Generation: desired.Generation, Phase: StatusApplying, Attempt: attempt, ActionID: action.ID,
+		})
 		undo, applyErr := engine.adapter.Apply(attemptContext, action)
 		if applyErr != nil {
 			err := operationError(attemptContext, applyErr)
-			return engine.failAttempt(rollbackContext, result, completed, fmt.Errorf("reconciliation: apply action %s: %w", formatActionID(action.ID), err))
+			return engine.failAttempt(rollbackContext, result, completed, attempt, fmt.Errorf("reconciliation: apply action %s: %w", formatActionID(action.ID), err))
 		}
 		undo.ActionID = action.ID
 		completed = append(completed, completedAction[U]{
@@ -156,13 +187,16 @@ func (engine *Engine[S, O, A, U]) runAttempt(
 			undo:       undo,
 		})
 		if err := context.Cause(attemptContext); err != nil {
-			return engine.failAttempt(rollbackContext, result, completed, fmt.Errorf("reconciliation: apply action %s: %w", formatActionID(action.ID), err))
+			return engine.failAttempt(rollbackContext, result, completed, attempt, fmt.Errorf("reconciliation: apply action %s: %w", formatActionID(action.ID), err))
 		}
 	}
 
+	publishStatus(attemptContext, StatusEvent{
+		Key: desired.Key, Generation: desired.Generation, Phase: StatusObserving, Attempt: attempt,
+	})
 	finalObserved, finalObserveErr := engine.adapter.Observe(attemptContext, desired.Key)
 	if err := operationError(attemptContext, finalObserveErr); err != nil {
-		return engine.failAttempt(rollbackContext, result, completed, fmt.Errorf("reconciliation: verify attempt %d: %w", attempt, err))
+		return engine.failAttempt(rollbackContext, result, completed, attempt, fmt.Errorf("reconciliation: verify attempt %d: %w", attempt, err))
 	}
 	result.Observed = finalObserved
 	result.Changed = len(completed) > 0
@@ -173,11 +207,15 @@ func (engine *Engine[S, O, A, U]) failAttempt(
 	parentContext context.Context,
 	result Result[O],
 	completed []completedAction[U],
+	attempt int,
 	primary error,
 ) (Result[O], error, bool) {
 	if len(completed) == 0 {
 		return result, primary, true
 	}
+	publishStatus(parentContext, StatusEvent{
+		Key: result.Key, Generation: result.Generation, Phase: StatusRollingBack, Attempt: attempt, Err: primary,
+	})
 	rollbackContext, cancelRollback := context.WithTimeout(
 		context.WithoutCancel(parentContext),
 		engine.policy.rollbackTimeout(),
