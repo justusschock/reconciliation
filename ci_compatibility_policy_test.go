@@ -49,10 +49,14 @@ func TestCICompatibilityPolicy(t *testing.T) {
 		"GOPRIVATE: github.com/justusschock/*",
 		"GONOSUMDB: github.com/justusschock/*",
 		"go mod verify",
-		"go mod tidy -diff",
+		"go mod tidy",
+		"git diff --exit-code -- go.mod go.sum",
 		"go vet ./...",
 		"go test -race -count=1 ./...",
 	)
+	if strings.Contains(matrixJob, "go mod tidy -diff") {
+		t.Error("Go 1.22 CI must not use the unsupported go mod tidy -diff flag")
+	}
 	if !regexp.MustCompile(`(?m)^\s+timeout-minutes:\s*[1-9][0-9]*\s*$`).MatchString(matrixJob) {
 		t.Error("matrix job must have a finite positive timeout-minutes value")
 	}
