@@ -85,7 +85,7 @@ func (exporter *Exporter[S]) Export(ctx context.Context, pending []Pending[S]) (
 		document.Pending[index] = wirePending{
 			Key:        value.Desired.Key,
 			Generation: value.Desired.Generation,
-			Spec:       spec,
+			Spec:       slices.Clone(spec),
 			RetryAt:    retryAt,
 		}
 	}
