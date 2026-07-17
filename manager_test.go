@@ -519,6 +519,62 @@ func TestManagerCloseDeadlineCancelsActiveWorkAndResolvesEveryFuture(t *testing.
 	}
 }
 
+func TestManagerConcurrentCloseDeadlinesUseOneShutdownCause(t *testing.T) {
+	started := make(chan struct{})
+	observedCause := make(chan error, 1)
+	release := make(chan struct{})
+	reconciler := reconcilerFunc[managerSpec, string](func(ctx context.Context, _ Desired[managerSpec]) (Result[string], error) {
+		close(started)
+		<-ctx.Done()
+		observedCause <- context.Cause(ctx)
+		<-release
+		return Result[string]{}, context.Cause(ctx)
+	})
+	manager, err := NewManager(reconciler, 1, cloneManagerSpec)
+	if err != nil {
+		t.Fatalf("NewManager() error = %v", err)
+	}
+	active := manager.Submit(context.Background(), managerDesired("active", 1))
+	receiveSignal(t, started, "active reconciliation")
+
+	firstCause := errors.New("first shutdown expired")
+	first, cancelFirst := context.WithCancelCause(context.Background())
+	cancelFirst(firstCause)
+	secondCause := errors.New("second shutdown expired")
+	second, cancelSecond := context.WithCancelCause(context.Background())
+	cancelSecond(secondCause)
+	gate := make(chan struct{})
+	closeResults := make(chan error, 2)
+	for _, closeContext := range []context.Context{first, second} {
+		closeContext := closeContext
+		go func() {
+			<-gate
+			closeResults <- manager.Close(closeContext)
+		}()
+	}
+	close(gate)
+
+	firstResult := receiveError(t, closeResults, "first concurrent close")
+	secondResult := receiveError(t, closeResults, "second concurrent close")
+	if firstResult == nil || secondResult == nil {
+		t.Fatalf("Close() errors = %v and %v, want one shutdown cause", firstResult, secondResult)
+	}
+	if !errors.Is(firstResult, secondResult) {
+		t.Fatalf("Close() errors selected different causes: %v and %v", firstResult, secondResult)
+	}
+	selectedCause := firstResult
+	if cause := receiveError(t, observedCause, "manager cancellation cause"); !errors.Is(cause, selectedCause) {
+		t.Fatalf("manager context cause = %v, want %v", cause, selectedCause)
+	}
+	if _, err := awaitManagerFuture(t, active); !errors.Is(err, selectedCause) {
+		t.Fatalf("active future error = %v, want %v", err, selectedCause)
+	}
+	close(release)
+	if err := manager.Close(context.Background()); !errors.Is(err, selectedCause) {
+		t.Fatalf("retained Close() error = %v, want %v", err, selectedCause)
+	}
+}
+
 func TestManagerSubmitContextOnlyControlsAdmission(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
