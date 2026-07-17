@@ -16,6 +16,8 @@ type Adapter[S, O, A, U any] struct {
 	UndoFunc    func(context.Context, reconciliation.Undo[U]) error
 }
 
+var _ reconciliation.Adapter[struct{}, struct{}, struct{}, struct{}] = Adapter[struct{}, struct{}, struct{}, struct{}]{}
+
 func (adapter Adapter[S, O, A, U]) Observe(ctx context.Context, key reconciliation.Key) (O, error) {
 	return adapter.ObserveFunc(ctx, key)
 }

@@ -5,16 +5,25 @@ import (
 	"fmt"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 var (
-	ErrInvalidPlan         = errors.New("reconciliation: invalid plan")
-	ErrInvalidActionID     = errors.New("reconciliation: invalid action ID")
-	ErrDuplicateAction     = errors.New("reconciliation: duplicate action")
-	ErrMissingDependency   = errors.New("reconciliation: missing dependency")
+	// ErrInvalidPlan is wrapped by every plan validation failure.
+	ErrInvalidPlan = errors.New("reconciliation: invalid plan")
+	// ErrInvalidActionID identifies an empty action or dependency ID.
+	ErrInvalidActionID = errors.New("reconciliation: invalid action ID")
+	// ErrDuplicateAction identifies two actions with the same ID.
+	ErrDuplicateAction = errors.New("reconciliation: duplicate action")
+	// ErrMissingDependency identifies an edge to an absent action.
+	ErrMissingDependency = errors.New("reconciliation: missing dependency")
+	// ErrDuplicateDependency identifies a repeated edge from one action.
 	ErrDuplicateDependency = errors.New("reconciliation: duplicate dependency")
-	ErrPlanCycle           = errors.New("reconciliation: plan cycle")
+	// ErrPlanCycle identifies a dependency cycle.
+	ErrPlanCycle = errors.New("reconciliation: plan cycle")
 )
 
 // ActionID identifies one action within a plan.
@@ -129,11 +138,28 @@ func validateAndCopyPlan[A any](plan Plan[A]) (Plan[A], error) {
 	if cycle := findCycle(canonical, byID, orderedIDs); len(cycle) > 0 {
 		parts := make([]string, len(cycle))
 		for index, id := range cycle {
-			parts[index] = string(id)
+			parts[index] = formatActionID(id)
 		}
 		return Plan[A]{}, invalidPlan(ErrPlanCycle, "%s", strings.Join(parts, " -> "))
 	}
 	return canonical, nil
+}
+
+func formatActionID(id ActionID) string {
+	value := string(id)
+	if utf8.ValidString(value) && !strings.Contains(value, " -> ") {
+		safe := true
+		for _, character := range value {
+			if unicode.IsControl(character) {
+				safe = false
+				break
+			}
+		}
+		if safe {
+			return value
+		}
+	}
+	return strconv.QuoteToASCII(value)
 }
 
 func findCycle[A any](plan Plan[A], byID map[ActionID]int, orderedIDs []ActionID) []ActionID {
