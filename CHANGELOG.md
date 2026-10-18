@@ -1,55 +1,44 @@
 # Changelog
 
-All notable changes to this project are documented in this file. The format
-is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the
-project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
-While the major version is 0, a minor release may break the API.
+All notable changes to this project are documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+While the major version is `0`, a minor release may break the API.
 
 ## [Unreleased]
 
-Preparation for the first public release.
+## [0.1.0] - 2026-10-18
 
-### Changed
-
-- **Breaking:** the minimum Go version is now 1.25 (was 1.22), because the
-  test suite uses `testing/synctest`. CI tests Go 1.25, `oldstable` and
-  `stable` (ADR-0011).
-- Time- and concurrency-dependent tests run on `testing/synctest` virtual
-  time instead of fake clocks, polling and wall-clock timeouts. The public
-  clock options (`Clock`, `EngineOption`, `WithClock`, `ManagerClock`,
-  `WithManagerClock`, `ErrNilClock`) are unchanged and keep dedicated tests
-  (ADR-0010).
-- CI no longer uses a token secret to fetch dependencies; every action is
-  pinned to a commit SHA, a golangci-lint job was added, and the pre-commit
-  step (with its Python setup) was dropped from CI (ADR-0013).
-- Dependabot keeps Go modules and GitHub Actions current.
+First public release.
 
 ### Added
 
-- Package documentation and doc comments for every exported identifier.
-- A unit test for the internal `conformance.Adapter` test helper.
-- `ExampleEngine_Reconcile`, a complete adapter example.
-- `NOTICE`, `AGENTS.md`, and `docs/` with a retrospective PRD and ADRs.
+- Action graphs: `Plan[A]` actions declare dependencies; `ValidatePlan`
+  and `Ordered` reject invalid graphs and produce a stable topological
+  order.
+- `Engine[S, O, A, U]` (`NewEngine`): observes, plans, validates the whole
+  plan before mutating, applies through a domain `Adapter`, and verifies
+  with a fresh observation.
+- Classified retries: errors wrapped with `Transient` or `Conflict` are
+  retried with capped, optionally jittered exponential backoff per
+  `Policy`; `Permanent` and unclassified errors are not.
+- Dependency-safe rollback of completed reversible actions in reverse
+  order, under a bounded cleanup deadline.
+- `Manager[S, O]` (`NewManager`): one call per key at a time, a bound on
+  active keys, generation coalescing and supersession (`ErrSuperseded`),
+  delayed requeues and graceful shutdown.
+- Pluggable time sources: `Clock` with `WithClock` and `ManagerClock` with
+  `WithManagerClock`.
+- Non-blocking status events through `WithStatusSink`,
+  `WithManagerStatusSink` and `EventStream`, with `StatusDropped` for
+  lagging subscribers.
+- Package `handoff`: `NewExporter` and `NewAdopter` move pending desired
+  state and absolute retry deadlines between processes as
+  integrity-checked `lifecycle` artifacts.
+- Requirements and architecture decision records under `docs/`.
 
-## [0.2.0] - 2026-07-17
+Requires Go 1.25 or newer.
 
-- Add generic desired, observed, condition, action, undo, and result contracts.
-- Validate arbitrary action dependency DAGs and produce deterministic
-  topological orders, including fan-out and branch convergence.
-- Add an observe-plan-apply-verify engine with classified retries, bounded
-  backoff, attempt deadlines, dependency-aware rollback, and status events.
-- Add a bounded keyed manager with generation coalescing, supersession,
-  delayed requeues, future results, cloned pending snapshots, and graceful
-  shutdown.
-- Add bounded non-blocking status streams with explicit dropped-event markers.
-- Add lifecycle-compatible export and adoption of pending desired state and
-  absolute retry deadlines.
-- Use canonical, integrity-checked, versioned artifacts without carrying
-  planned actions, running work, resource rights, or runtime errors.
-- Define codec buffer/value ownership and add compile-checked DAG, manager, and
-  handoff examples.
-- Support Go 1.22 and test Go 1.22 through Go 1.26 in GitHub Actions.
-- Require `concurrency` and `lifecycle` at `v0.2.0`.
-
-[Unreleased]: https://github.com/justusschock/reconciliation/compare/v0.2.0...HEAD
-[0.2.0]: https://github.com/justusschock/reconciliation/releases/tag/v0.2.0
+[Unreleased]: https://github.com/justusschock/reconciliation/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/justusschock/reconciliation/releases/tag/v0.1.0
