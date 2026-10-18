@@ -26,9 +26,9 @@ Preparation for the first public release.
   `stable` (ADR-0011).
 - Time- and concurrency-dependent tests run on `testing/synctest` virtual
   time instead of fake clocks, polling and wall-clock timeouts.
-- CI no longer needs private-module credentials; every action is pinned to
-  a commit SHA, a golangci-lint job was added, and the pre-commit step (with
-  its Python setup) was dropped from CI (ADR-0013).
+- CI no longer uses a token secret to fetch dependencies; every action is
+  pinned to a commit SHA, a golangci-lint job was added, and the pre-commit
+  step (with its Python setup) was dropped from CI (ADR-0013).
 - Dependabot keeps Go modules and GitHub Actions current.
 
 ### Added

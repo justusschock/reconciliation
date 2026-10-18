@@ -10,9 +10,10 @@
 
 ## Context
 
-Recorded retrospectively. Before the public release, CI configured private
-module access with a token secret, used actions by mutable tags, and ran
-`pre-commit` through `actions/setup-python` and `pip install pre-commit`.
+Recorded retrospectively. Before the public release, CI fetched
+dependencies with a repository token secret, used actions by mutable tags,
+and ran `pre-commit` through `actions/setup-python` and
+`pip install pre-commit`.
 The pre-commit configuration runs `gofmt`, `go vet` and `go test` plus
 generic hygiene hooks (YAML syntax, merge markers, large files, private keys,
 whitespace) fetched from `pre-commit-hooks` by tag at run time.
@@ -34,8 +35,9 @@ whitespace) fetched from `pre-commit-hooks` by tag at run time.
    - Pro: hygiene hooks keep running.
    - Con: duplicates the Go checks; downloads hook repositories by mutable
      tag and an unpinned `pre-commit` from PyPI, outside the pinning policy.
-3. **Keep the private-module workflow**
-   - Not viable for a public module.
+3. **Keep the token-based workflow**
+   - Not needed once dependencies are public, and a secret in CI widens the
+     attack surface.
 
 ## Decision
 
