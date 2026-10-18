@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/justusschock/go-concurrency"
@@ -63,686 +64,671 @@ func (*stubReconciler) Reconcile(_ context.Context, desired Desired[managerSpec]
 }
 
 func TestManagerSerializesKeysAndBoundsActiveWork(t *testing.T) {
-	type callID struct {
-		key        Key
-		generation Generation
-	}
-	gates := map[callID]chan struct{}{
-		{key: "a", generation: 1}: make(chan struct{}),
-		{key: "a", generation: 2}: make(chan struct{}),
-		{key: "b", generation: 1}: make(chan struct{}),
-		{key: "c", generation: 1}: make(chan struct{}),
-	}
-	started := make(chan callID, len(gates))
-	var mu sync.Mutex
-	activeByKey := make(map[Key]int)
-	active := 0
-	maximum := 0
-	overlapped := false
-	reconciler := reconcilerFunc[managerSpec, string](func(ctx context.Context, desired Desired[managerSpec]) (Result[string], error) {
-		id := callID{key: desired.Key, generation: desired.Generation}
-		mu.Lock()
-		active++
-		activeByKey[desired.Key]++
-		maximum = max(maximum, active)
-		overlapped = overlapped || activeByKey[desired.Key] > 1
-		mu.Unlock()
-		started <- id
-		select {
-		case <-gates[id]:
-		case <-ctx.Done():
-			return Result[string]{}, context.Cause(ctx)
+	synctest.Test(t, func(t *testing.T) {
+		type callID struct {
+			key        Key
+			generation Generation
+		}
+		gates := map[callID]chan struct{}{
+			{key: "a", generation: 1}: make(chan struct{}),
+			{key: "a", generation: 2}: make(chan struct{}),
+			{key: "b", generation: 1}: make(chan struct{}),
+			{key: "c", generation: 1}: make(chan struct{}),
+		}
+		started := make(chan callID, len(gates))
+		var mu sync.Mutex
+		activeByKey := make(map[Key]int)
+		active := 0
+		maximum := 0
+		overlapped := false
+		reconciler := reconcilerFunc[managerSpec, string](func(ctx context.Context, desired Desired[managerSpec]) (Result[string], error) {
+			id := callID{key: desired.Key, generation: desired.Generation}
+			mu.Lock()
+			active++
+			activeByKey[desired.Key]++
+			maximum = max(maximum, active)
+			overlapped = overlapped || activeByKey[desired.Key] > 1
+			mu.Unlock()
+			started <- id
+			select {
+			case <-gates[id]:
+			case <-ctx.Done():
+				return Result[string]{}, context.Cause(ctx)
+			}
+			mu.Lock()
+			active--
+			activeByKey[desired.Key]--
+			mu.Unlock()
+			return managerResult(desired, string(desired.Key)), nil
+		})
+
+		manager, err := NewManager(reconciler, 2, cloneManagerSpec)
+		if err != nil {
+			t.Fatalf("NewManager() error = %v", err)
+		}
+		futures := []*concurrency.Future[Result[string]]{
+			manager.Submit(context.Background(), managerDesired("a", 1)),
+			manager.Submit(context.Background(), managerDesired("a", 2)),
+			manager.Submit(context.Background(), managerDesired("b", 1)),
+			manager.Submit(context.Background(), managerDesired("c", 1)),
+		}
+
+		first := receiveManagerCall(t, started)
+		second := receiveManagerCall(t, started)
+		if got := []Key{first.key, second.key}; !sameKeys(got, []Key{"a", "b"}) {
+			t.Fatalf("first active keys = %v, want a and b", got)
+		}
+		close(gates[callID{key: "a", generation: 1}])
+		third := receiveManagerCall(t, started)
+		if third != (callID{key: "a", generation: 2}) {
+			t.Fatalf("third call = %#v, want a generation 2", third)
+		}
+		close(gates[callID{key: "b", generation: 1}])
+		fourth := receiveManagerCall(t, started)
+		if fourth != (callID{key: "c", generation: 1}) {
+			t.Fatalf("fourth call = %#v, want c generation 1", fourth)
+		}
+		close(gates[callID{key: "a", generation: 2}])
+		close(gates[callID{key: "c", generation: 1}])
+		for index, future := range futures {
+			if _, err := awaitManagerFuture(t, future); err != nil {
+				t.Fatalf("future %d error = %v", index, err)
+			}
 		}
 		mu.Lock()
-		active--
-		activeByKey[desired.Key]--
+		gotMaximum, gotOverlap := maximum, overlapped
 		mu.Unlock()
-		return managerResult(desired, string(desired.Key)), nil
+		if gotMaximum != 2 {
+			t.Fatalf("maximum active = %d, want 2", gotMaximum)
+		}
+		if gotOverlap {
+			t.Fatal("same key reconciled concurrently")
+		}
+		if err := manager.Close(context.Background()); err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
 	})
-
-	manager, err := NewManager(reconciler, 2, cloneManagerSpec)
-	if err != nil {
-		t.Fatalf("NewManager() error = %v", err)
-	}
-	futures := []*concurrency.Future[Result[string]]{
-		manager.Submit(context.Background(), managerDesired("a", 1)),
-		manager.Submit(context.Background(), managerDesired("a", 2)),
-		manager.Submit(context.Background(), managerDesired("b", 1)),
-		manager.Submit(context.Background(), managerDesired("c", 1)),
-	}
-
-	first := receiveManagerCall(t, started)
-	second := receiveManagerCall(t, started)
-	if got := []Key{first.key, second.key}; !sameKeys(got, []Key{"a", "b"}) {
-		t.Fatalf("first active keys = %v, want a and b", got)
-	}
-	close(gates[callID{key: "a", generation: 1}])
-	third := receiveManagerCall(t, started)
-	if third != (callID{key: "a", generation: 2}) {
-		t.Fatalf("third call = %#v, want a generation 2", third)
-	}
-	close(gates[callID{key: "b", generation: 1}])
-	fourth := receiveManagerCall(t, started)
-	if fourth != (callID{key: "c", generation: 1}) {
-		t.Fatalf("fourth call = %#v, want c generation 1", fourth)
-	}
-	close(gates[callID{key: "a", generation: 2}])
-	close(gates[callID{key: "c", generation: 1}])
-	for index, future := range futures {
-		if _, err := awaitManagerFuture(t, future); err != nil {
-			t.Fatalf("future %d error = %v", index, err)
-		}
-	}
-	mu.Lock()
-	gotMaximum, gotOverlap := maximum, overlapped
-	mu.Unlock()
-	if gotMaximum != 2 {
-		t.Fatalf("maximum active = %d, want 2", gotMaximum)
-	}
-	if gotOverlap {
-		t.Fatal("same key reconciled concurrently")
-	}
-	if err := manager.Close(context.Background()); err != nil {
-		t.Fatalf("Close() error = %v", err)
-	}
 }
 
 func TestManagerCoalescesEqualAndSupersedesPendingGenerations(t *testing.T) {
-	blockerRelease := make(chan struct{})
-	targetCalls := make(chan Desired[managerSpec], 2)
-	var targetCount atomic.Int32
-	reconciler := reconcilerFunc[managerSpec, string](func(ctx context.Context, desired Desired[managerSpec]) (Result[string], error) {
-		if desired.Key == "blocker" {
-			select {
-			case <-blockerRelease:
-				return managerResult(desired, "blocker"), nil
-			case <-ctx.Done():
-				return Result[string]{}, context.Cause(ctx)
+	synctest.Test(t, func(t *testing.T) {
+		blockerRelease := make(chan struct{})
+		targetCalls := make(chan Desired[managerSpec], 2)
+		var targetCount atomic.Int32
+		reconciler := reconcilerFunc[managerSpec, string](func(ctx context.Context, desired Desired[managerSpec]) (Result[string], error) {
+			if desired.Key == "blocker" {
+				select {
+				case <-blockerRelease:
+					return managerResult(desired, "blocker"), nil
+				case <-ctx.Done():
+					return Result[string]{}, context.Cause(ctx)
+				}
+			}
+			targetCount.Add(1)
+			targetCalls <- desired
+			return managerResult(desired, "target"), nil
+		})
+
+		manager, err := NewManager(reconciler, 1, cloneManagerSpec)
+		if err != nil {
+			t.Fatalf("NewManager() error = %v", err)
+		}
+		blocker := manager.Submit(context.Background(), managerDesired("blocker", 1))
+		first := manager.Submit(context.Background(), managerDesired("target", 1))
+		equalFirst := manager.Submit(context.Background(), managerDesired("target", 1))
+		second := manager.Submit(context.Background(), managerDesired("target", 2))
+		equalSecond := manager.Submit(context.Background(), managerDesired("target", 2))
+		older := manager.Submit(context.Background(), managerDesired("target", 1))
+
+		for name, future := range map[string]*concurrency.Future[Result[string]]{
+			"first": first, "equal first": equalFirst, "older": older,
+		} {
+			if _, err := awaitManagerFuture(t, future); !errors.Is(err, ErrSuperseded) {
+				t.Fatalf("%s error = %v, want ErrSuperseded", name, err)
 			}
 		}
-		targetCount.Add(1)
-		targetCalls <- desired
-		return managerResult(desired, "target"), nil
+		pending := manager.Pending()
+		if len(pending) != 1 || pending[0].Desired.Key != "target" || pending[0].Desired.Generation != 2 || !pending[0].RetryAt.IsZero() {
+			t.Fatalf("Pending() = %#v, want target generation 2 ready immediately", pending)
+		}
+		close(blockerRelease)
+		if _, err := awaitManagerFuture(t, blocker); err != nil {
+			t.Fatalf("blocker error = %v", err)
+		}
+		call := receiveManagerDesired(t, targetCalls)
+		if call.Generation != 2 {
+			t.Fatalf("target generation = %d, want 2", call.Generation)
+		}
+		for name, future := range map[string]*concurrency.Future[Result[string]]{"second": second, "equal second": equalSecond} {
+			result, err := awaitManagerFuture(t, future)
+			if err != nil || result.Generation != 2 {
+				t.Fatalf("%s = (%#v, %v), want generation 2", name, result, err)
+			}
+		}
+		if got := targetCount.Load(); got != 1 {
+			t.Fatalf("target reconciliations = %d, want 1", got)
+		}
+		if err := manager.Close(context.Background()); err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
 	})
-
-	manager, err := NewManager(reconciler, 1, cloneManagerSpec)
-	if err != nil {
-		t.Fatalf("NewManager() error = %v", err)
-	}
-	blocker := manager.Submit(context.Background(), managerDesired("blocker", 1))
-	first := manager.Submit(context.Background(), managerDesired("target", 1))
-	equalFirst := manager.Submit(context.Background(), managerDesired("target", 1))
-	second := manager.Submit(context.Background(), managerDesired("target", 2))
-	equalSecond := manager.Submit(context.Background(), managerDesired("target", 2))
-	older := manager.Submit(context.Background(), managerDesired("target", 1))
-
-	for name, future := range map[string]*concurrency.Future[Result[string]]{
-		"first": first, "equal first": equalFirst, "older": older,
-	} {
-		if _, err := awaitManagerFuture(t, future); !errors.Is(err, ErrSuperseded) {
-			t.Fatalf("%s error = %v, want ErrSuperseded", name, err)
-		}
-	}
-	pending := manager.Pending()
-	if len(pending) != 1 || pending[0].Desired.Key != "target" || pending[0].Desired.Generation != 2 || !pending[0].RetryAt.IsZero() {
-		t.Fatalf("Pending() = %#v, want target generation 2 ready immediately", pending)
-	}
-	close(blockerRelease)
-	if _, err := awaitManagerFuture(t, blocker); err != nil {
-		t.Fatalf("blocker error = %v", err)
-	}
-	call := receiveManagerDesired(t, targetCalls)
-	if call.Generation != 2 {
-		t.Fatalf("target generation = %d, want 2", call.Generation)
-	}
-	for name, future := range map[string]*concurrency.Future[Result[string]]{"second": second, "equal second": equalSecond} {
-		result, err := awaitManagerFuture(t, future)
-		if err != nil || result.Generation != 2 {
-			t.Fatalf("%s = (%#v, %v), want generation 2", name, result, err)
-		}
-	}
-	if got := targetCount.Load(); got != 1 {
-		t.Fatalf("target reconciliations = %d, want 1", got)
-	}
-	if err := manager.Close(context.Background()); err != nil {
-		t.Fatalf("Close() error = %v", err)
-	}
 }
 
 func TestManagerDoesNotCancelActiveWorkOnSupersession(t *testing.T) {
-	firstStarted := make(chan struct{})
-	firstRelease := make(chan struct{})
-	secondStarted := make(chan struct{})
-	var firstCanceled atomic.Bool
-	reconciler := reconcilerFunc[managerSpec, string](func(ctx context.Context, desired Desired[managerSpec]) (Result[string], error) {
-		if desired.Generation == 1 {
-			close(firstStarted)
-			select {
-			case <-firstRelease:
-			case <-ctx.Done():
-				firstCanceled.Store(true)
-				return Result[string]{}, context.Cause(ctx)
+	synctest.Test(t, func(t *testing.T) {
+		firstStarted := make(chan struct{})
+		firstRelease := make(chan struct{})
+		secondStarted := make(chan struct{})
+		var firstCanceled atomic.Bool
+		reconciler := reconcilerFunc[managerSpec, string](func(ctx context.Context, desired Desired[managerSpec]) (Result[string], error) {
+			if desired.Generation == 1 {
+				close(firstStarted)
+				select {
+				case <-firstRelease:
+				case <-ctx.Done():
+					firstCanceled.Store(true)
+					return Result[string]{}, context.Cause(ctx)
+				}
+			} else {
+				close(secondStarted)
 			}
-		} else {
-			close(secondStarted)
+			return managerResult(desired, "ok"), nil
+		})
+		manager, err := NewManager(reconciler, 1, cloneManagerSpec)
+		if err != nil {
+			t.Fatalf("NewManager() error = %v", err)
 		}
-		return managerResult(desired, "ok"), nil
+		first := manager.Submit(context.Background(), managerDesired("target", 1))
+		receiveSignal(t, firstStarted, "first reconciliation")
+		second := manager.Submit(context.Background(), managerDesired("target", 2))
+		close(firstRelease)
+		if result, err := awaitManagerFuture(t, first); err != nil || result.Generation != 1 {
+			t.Fatalf("first future = (%#v, %v), want successful generation 1", result, err)
+		}
+		receiveSignal(t, secondStarted, "second reconciliation")
+		if result, err := awaitManagerFuture(t, second); err != nil || result.Generation != 2 {
+			t.Fatalf("second future = (%#v, %v), want successful generation 2", result, err)
+		}
+		if firstCanceled.Load() {
+			t.Fatal("active generation was canceled by supersession")
+		}
+		if err := manager.Close(context.Background()); err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
 	})
-	manager, err := NewManager(reconciler, 1, cloneManagerSpec)
-	if err != nil {
-		t.Fatalf("NewManager() error = %v", err)
-	}
-	first := manager.Submit(context.Background(), managerDesired("target", 1))
-	receiveSignal(t, firstStarted, "first reconciliation")
-	second := manager.Submit(context.Background(), managerDesired("target", 2))
-	close(firstRelease)
-	if result, err := awaitManagerFuture(t, first); err != nil || result.Generation != 1 {
-		t.Fatalf("first future = (%#v, %v), want successful generation 1", result, err)
-	}
-	receiveSignal(t, secondStarted, "second reconciliation")
-	if result, err := awaitManagerFuture(t, second); err != nil || result.Generation != 2 {
-		t.Fatalf("second future = (%#v, %v), want successful generation 2", result, err)
-	}
-	if firstCanceled.Load() {
-		t.Fatal("active generation was canceled by supersession")
-	}
-	if err := manager.Close(context.Background()); err != nil {
-		t.Fatalf("Close() error = %v", err)
-	}
 }
 
 func TestManagerOwnsAcceptedAndPendingSpecs(t *testing.T) {
-	blockerStarted := make(chan struct{})
-	blockerRelease := make(chan struct{})
-	seen := make(chan Desired[managerSpec], 3)
-	reconciler := reconcilerFunc[managerSpec, string](func(ctx context.Context, desired Desired[managerSpec]) (Result[string], error) {
-		seen <- desired
-		if desired.Key == "active" {
-			close(blockerStarted)
-			select {
-			case <-blockerRelease:
-			case <-ctx.Done():
-				return Result[string]{}, context.Cause(ctx)
+	synctest.Test(t, func(t *testing.T) {
+		blockerStarted := make(chan struct{})
+		blockerRelease := make(chan struct{})
+		seen := make(chan Desired[managerSpec], 3)
+		reconciler := reconcilerFunc[managerSpec, string](func(ctx context.Context, desired Desired[managerSpec]) (Result[string], error) {
+			seen <- desired
+			if desired.Key == "active" {
+				close(blockerStarted)
+				select {
+				case <-blockerRelease:
+				case <-ctx.Done():
+					return Result[string]{}, context.Cause(ctx)
+				}
+			}
+			return managerResult(desired, desired.Spec.Values["value"]), nil
+		})
+		manager, err := NewManager(reconciler, 1, cloneManagerSpec)
+		if err != nil {
+			t.Fatalf("NewManager() error = %v", err)
+		}
+		active := manager.Submit(context.Background(), managerDesired("active", 1))
+		receiveSignal(t, blockerStarted, "active reconciliation")
+		originalB := managerDesired("b", 1)
+		originalZ := managerDesired("z", 1)
+		futureB := manager.Submit(context.Background(), originalB)
+		futureZ := manager.Submit(context.Background(), originalZ)
+		originalB.Spec.Values["value"] = "caller mutation"
+		originalZ.Spec.Values["value"] = "caller mutation"
+
+		pending := manager.Pending()
+		if got := []Key{pending[0].Desired.Key, pending[1].Desired.Key}; !slices.Equal(got, []Key{"b", "z"}) {
+			t.Fatalf("Pending() keys = %v, want [b z]", got)
+		}
+		if !pending[0].RetryAt.IsZero() || !pending[1].RetryAt.IsZero() {
+			t.Fatalf("Pending() retry deadlines = %v, %v, want zero", pending[0].RetryAt, pending[1].RetryAt)
+		}
+		pending[0].Desired.Spec.Values["value"] = "snapshot mutation"
+		if got := manager.Pending()[0].Desired.Spec.Values["value"]; got != "b" {
+			t.Fatalf("second Pending() spec = %q, want owned value b", got)
+		}
+
+		close(blockerRelease)
+		for index, future := range []*concurrency.Future[Result[string]]{active, futureB, futureZ} {
+			if _, err := awaitManagerFuture(t, future); err != nil {
+				t.Fatalf("future %d error = %v", index, err)
 			}
 		}
-		return managerResult(desired, desired.Spec.Values["value"]), nil
+		close(seen)
+		for desired := range seen {
+			if desired.Key != "active" && desired.Spec.Values["value"] != string(desired.Key) {
+				t.Fatalf("reconciler saw mutated desired = %#v", desired)
+			}
+		}
+		if err := manager.Close(context.Background()); err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
 	})
-	manager, err := NewManager(reconciler, 1, cloneManagerSpec)
-	if err != nil {
-		t.Fatalf("NewManager() error = %v", err)
-	}
-	active := manager.Submit(context.Background(), managerDesired("active", 1))
-	receiveSignal(t, blockerStarted, "active reconciliation")
-	originalB := managerDesired("b", 1)
-	originalZ := managerDesired("z", 1)
-	futureB := manager.Submit(context.Background(), originalB)
-	futureZ := manager.Submit(context.Background(), originalZ)
-	originalB.Spec.Values["value"] = "caller mutation"
-	originalZ.Spec.Values["value"] = "caller mutation"
-
-	pending := manager.Pending()
-	if got := []Key{pending[0].Desired.Key, pending[1].Desired.Key}; !slices.Equal(got, []Key{"b", "z"}) {
-		t.Fatalf("Pending() keys = %v, want [b z]", got)
-	}
-	if !pending[0].RetryAt.IsZero() || !pending[1].RetryAt.IsZero() {
-		t.Fatalf("Pending() retry deadlines = %v, %v, want zero", pending[0].RetryAt, pending[1].RetryAt)
-	}
-	pending[0].Desired.Spec.Values["value"] = "snapshot mutation"
-	if got := manager.Pending()[0].Desired.Spec.Values["value"]; got != "b" {
-		t.Fatalf("second Pending() spec = %q, want owned value b", got)
-	}
-
-	close(blockerRelease)
-	for index, future := range []*concurrency.Future[Result[string]]{active, futureB, futureZ} {
-		if _, err := awaitManagerFuture(t, future); err != nil {
-			t.Fatalf("future %d error = %v", index, err)
-		}
-	}
-	close(seen)
-	for desired := range seen {
-		if desired.Key != "active" && desired.Spec.Values["value"] != string(desired.Key) {
-			t.Fatalf("reconciler saw mutated desired = %#v", desired)
-		}
-	}
-	if err := manager.Close(context.Background()); err != nil {
-		t.Fatalf("Close() error = %v", err)
-	}
 }
 
 func TestManagerCoalescedResultsOwnConditionsButObservedIsShallow(t *testing.T) {
-	started := make(chan struct{})
-	release := make(chan struct{})
-	observed := map[string]string{"value": "shared"}
-	reconciler := reconcilerFunc[managerSpec, map[string]string](func(ctx context.Context, desired Desired[managerSpec]) (Result[map[string]string], error) {
-		close(started)
-		select {
-		case <-release:
-		case <-ctx.Done():
-			return Result[map[string]string]{}, context.Cause(ctx)
+	synctest.Test(t, func(t *testing.T) {
+		started := make(chan struct{})
+		release := make(chan struct{})
+		observed := map[string]string{"value": "shared"}
+		reconciler := reconcilerFunc[managerSpec, map[string]string](func(ctx context.Context, desired Desired[managerSpec]) (Result[map[string]string], error) {
+			close(started)
+			select {
+			case <-release:
+			case <-ctx.Done():
+				return Result[map[string]string]{}, context.Cause(ctx)
+			}
+			return Result[map[string]string]{
+				Key: desired.Key, Generation: desired.Generation, Observed: observed,
+				Conditions: []Condition{{Type: "Ready", Status: ConditionTrue, Message: "owned"}},
+			}, nil
+		})
+		manager, err := NewManager(reconciler, 1, cloneManagerSpec)
+		if err != nil {
+			t.Fatalf("NewManager() error = %v", err)
 		}
-		return Result[map[string]string]{
-			Key: desired.Key, Generation: desired.Generation, Observed: observed,
-			Conditions: []Condition{{Type: "Ready", Status: ConditionTrue, Message: "owned"}},
-		}, nil
+		first := manager.Submit(context.Background(), managerDesired("target", 1))
+		receiveSignal(t, started, "reconciliation")
+		second := manager.Submit(context.Background(), managerDesired("target", 1))
+		close(release)
+		firstResult, firstErr := awaitManagerFuture(t, first)
+		secondResult, secondErr := awaitManagerFuture(t, second)
+		if firstErr != nil || secondErr != nil {
+			t.Fatalf("future errors = %v, %v", firstErr, secondErr)
+		}
+		firstResult.Conditions[0].Message = "changed"
+		if secondResult.Conditions[0].Message != "owned" {
+			t.Fatalf("coalesced conditions share storage: %#v", secondResult.Conditions)
+		}
+		firstResult.Observed["value"] = "shallow"
+		if secondResult.Observed["value"] != "shallow" {
+			t.Fatalf("Observed was deep-copied, want documented shallow ownership: %#v", secondResult.Observed)
+		}
+		if err := manager.Close(context.Background()); err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
 	})
-	manager, err := NewManager(reconciler, 1, cloneManagerSpec)
-	if err != nil {
-		t.Fatalf("NewManager() error = %v", err)
-	}
-	first := manager.Submit(context.Background(), managerDesired("target", 1))
-	receiveSignal(t, started, "reconciliation")
-	second := manager.Submit(context.Background(), managerDesired("target", 1))
-	close(release)
-	firstResult, firstErr := awaitManagerFuture(t, first)
-	secondResult, secondErr := awaitManagerFuture(t, second)
-	if firstErr != nil || secondErr != nil {
-		t.Fatalf("future errors = %v, %v", firstErr, secondErr)
-	}
-	firstResult.Conditions[0].Message = "changed"
-	if secondResult.Conditions[0].Message != "owned" {
-		t.Fatalf("coalesced conditions share storage: %#v", secondResult.Conditions)
-	}
-	firstResult.Observed["value"] = "shallow"
-	if secondResult.Observed["value"] != "shallow" {
-		t.Fatalf("Observed was deep-copied, want documented shallow ownership: %#v", secondResult.Observed)
-	}
-	if err := manager.Close(context.Background()); err != nil {
-		t.Fatalf("Close() error = %v", err)
-	}
 }
 
 func TestManagerRequeuesAtAbsoluteDeadlineAndResolvesOriginalFuture(t *testing.T) {
-	clock := newManagerClock(time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC))
-	calls := make(chan int, 2)
-	var count atomic.Int32
-	reconciler := reconcilerFunc[managerSpec, string](func(_ context.Context, desired Desired[managerSpec]) (Result[string], error) {
-		call := int(count.Add(1))
-		calls <- call
-		result := managerResult(desired, "final")
-		if call == 1 {
-			result.Observed = "intermediate"
-			result.RequeueAfter = 10 * time.Second
+	synctest.Test(t, func(t *testing.T) {
+		start := time.Now()
+		calls := make(chan int, 2)
+		var count atomic.Int32
+		reconciler := reconcilerFunc[managerSpec, string](func(_ context.Context, desired Desired[managerSpec]) (Result[string], error) {
+			call := int(count.Add(1))
+			calls <- call
+			result := managerResult(desired, "final")
+			if call == 1 {
+				result.Observed = "intermediate"
+				result.RequeueAfter = 10 * time.Second
+			}
+			return result, nil
+		})
+		manager, err := NewManager(reconciler, 1, cloneManagerSpec)
+		if err != nil {
+			t.Fatalf("NewManager() error = %v", err)
 		}
-		return result, nil
+		future := manager.Submit(context.Background(), managerDesired("target", 1))
+		if call := receiveInt(t, calls, "first reconciliation"); call != 1 {
+			t.Fatalf("first call = %d", call)
+		}
+		pending := waitForManagerPending(t, manager, 1)
+		wantRetryAt := start.Add(10 * time.Second)
+		if !pending[0].RetryAt.Equal(wantRetryAt) {
+			t.Fatalf("RetryAt = %v, want %v", pending[0].RetryAt, wantRetryAt)
+		}
+		if _, _, ready := future.Try(); ready {
+			t.Fatal("future resolved before requeued generation completed")
+		}
+		time.Sleep(10*time.Second - time.Nanosecond)
+		synctest.Wait()
+		if got := count.Load(); got != 1 {
+			t.Fatalf("calls before deadline = %d, want 1", got)
+		}
+		if call := receiveInt(t, calls, "requeued reconciliation"); call != 2 {
+			t.Fatalf("second call = %d", call)
+		}
+		if elapsed := time.Since(start); elapsed != 10*time.Second {
+			t.Fatalf("requeued call started after %v, want %v", elapsed, 10*time.Second)
+		}
+		result, err := awaitManagerFuture(t, future)
+		if err != nil || result.Observed != "final" || result.RequeueAfter != 0 {
+			t.Fatalf("future = (%#v, %v), want final completed run", result, err)
+		}
+		if err := manager.Close(context.Background()); err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
 	})
-	manager, err := NewManager(reconciler, 1, cloneManagerSpec, WithManagerClock(clock))
-	if err != nil {
-		t.Fatalf("NewManager() error = %v", err)
-	}
-	future := manager.Submit(context.Background(), managerDesired("target", 1))
-	if call := receiveInt(t, calls, "first reconciliation"); call != 1 {
-		t.Fatalf("first call = %d", call)
-	}
-	pending := waitForManagerPending(t, manager, 1)
-	wantRetryAt := clock.Start().Add(10 * time.Second)
-	if !pending[0].RetryAt.Equal(wantRetryAt) {
-		t.Fatalf("RetryAt = %v, want %v", pending[0].RetryAt, wantRetryAt)
-	}
-	if _, _, ready := future.Try(); ready {
-		t.Fatal("future resolved before requeued generation completed")
-	}
-	clock.Advance(9 * time.Second)
-	if got := count.Load(); got != 1 {
-		t.Fatalf("calls before deadline = %d, want 1", got)
-	}
-	clock.Advance(time.Second)
-	if call := receiveInt(t, calls, "requeued reconciliation"); call != 2 {
-		t.Fatalf("second call = %d", call)
-	}
-	result, err := awaitManagerFuture(t, future)
-	if err != nil || result.Observed != "final" || result.RequeueAfter != 0 {
-		t.Fatalf("future = (%#v, %v), want final completed run", result, err)
-	}
-	if err := manager.Close(context.Background()); err != nil {
-		t.Fatalf("Close() error = %v", err)
-	}
 }
 
 func TestManagerNewGenerationReplacesScheduledRequeue(t *testing.T) {
-	clock := newManagerClock(time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC))
-	calls := make(chan Generation, 3)
-	reconciler := reconcilerFunc[managerSpec, string](func(_ context.Context, desired Desired[managerSpec]) (Result[string], error) {
-		calls <- desired.Generation
-		result := managerResult(desired, "done")
-		if desired.Generation == 1 {
-			result.RequeueAfter = time.Hour
+	synctest.Test(t, func(t *testing.T) {
+		calls := make(chan Generation, 3)
+		reconciler := reconcilerFunc[managerSpec, string](func(_ context.Context, desired Desired[managerSpec]) (Result[string], error) {
+			calls <- desired.Generation
+			result := managerResult(desired, "done")
+			if desired.Generation == 1 {
+				result.RequeueAfter = time.Hour
+			}
+			return result, nil
+		})
+		manager, err := NewManager(reconciler, 1, cloneManagerSpec)
+		if err != nil {
+			t.Fatalf("NewManager() error = %v", err)
 		}
-		return result, nil
+		first := manager.Submit(context.Background(), managerDesired("target", 1))
+		if generation := receiveGeneration(t, calls); generation != 1 {
+			t.Fatalf("first generation = %d", generation)
+		}
+		waitForManagerPending(t, manager, 1)
+		second := manager.Submit(context.Background(), managerDesired("target", 2))
+		if _, err := awaitManagerFuture(t, first); !errors.Is(err, ErrSuperseded) {
+			t.Fatalf("first future error = %v, want ErrSuperseded", err)
+		}
+		if generation := receiveGeneration(t, calls); generation != 2 {
+			t.Fatalf("second generation = %d", generation)
+		}
+		if result, err := awaitManagerFuture(t, second); err != nil || result.Generation != 2 {
+			t.Fatalf("second future = (%#v, %v), want generation 2", result, err)
+		}
+		time.Sleep(2 * time.Hour)
+		synctest.Wait()
+		if err := manager.Close(context.Background()); err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+		if got := len(calls); got != 0 {
+			t.Fatalf("obsolete requeue produced %d extra calls", got)
+		}
 	})
-	manager, err := NewManager(reconciler, 1, cloneManagerSpec, WithManagerClock(clock))
-	if err != nil {
-		t.Fatalf("NewManager() error = %v", err)
-	}
-	first := manager.Submit(context.Background(), managerDesired("target", 1))
-	if generation := receiveGeneration(t, calls); generation != 1 {
-		t.Fatalf("first generation = %d", generation)
-	}
-	waitForManagerPending(t, manager, 1)
-	second := manager.Submit(context.Background(), managerDesired("target", 2))
-	if _, err := awaitManagerFuture(t, first); !errors.Is(err, ErrSuperseded) {
-		t.Fatalf("first future error = %v, want ErrSuperseded", err)
-	}
-	if generation := receiveGeneration(t, calls); generation != 2 {
-		t.Fatalf("second generation = %d", generation)
-	}
-	if result, err := awaitManagerFuture(t, second); err != nil || result.Generation != 2 {
-		t.Fatalf("second future = (%#v, %v), want generation 2", result, err)
-	}
-	clock.Advance(2 * time.Hour)
-	if err := manager.Close(context.Background()); err != nil {
-		t.Fatalf("Close() error = %v", err)
-	}
-	if got := len(calls); got != 0 {
-		t.Fatalf("obsolete requeue produced %d extra calls", got)
-	}
 }
 
 func TestManagerCloseStopsAdmissionFailsPendingAndLetsActiveFinish(t *testing.T) {
-	started := make(chan struct{})
-	release := make(chan struct{})
-	activeCanceled := make(chan error, 1)
-	reconciler := reconcilerFunc[managerSpec, string](func(ctx context.Context, desired Desired[managerSpec]) (Result[string], error) {
-		close(started)
+	synctest.Test(t, func(t *testing.T) {
+		started := make(chan struct{})
+		release := make(chan struct{})
+		activeCanceled := make(chan error, 1)
+		reconciler := reconcilerFunc[managerSpec, string](func(ctx context.Context, desired Desired[managerSpec]) (Result[string], error) {
+			close(started)
+			select {
+			case <-release:
+				return managerResult(desired, "done"), nil
+			case <-ctx.Done():
+				activeCanceled <- context.Cause(ctx)
+				return Result[string]{}, context.Cause(ctx)
+			}
+		})
+		manager, err := NewManager(reconciler, 1, cloneManagerSpec)
+		if err != nil {
+			t.Fatalf("NewManager() error = %v", err)
+		}
+		active := manager.Submit(context.Background(), managerDesired("active", 1))
+		receiveSignal(t, started, "active reconciliation")
+		pending := manager.Submit(context.Background(), managerDesired("pending", 1))
+		closed := make(chan error, 1)
+		go func() { closed <- manager.Close(context.Background()) }()
+		if _, err := awaitManagerFuture(t, pending); !errors.Is(err, concurrency.ErrClosed) {
+			t.Fatalf("pending future error = %v, want ErrClosed", err)
+		}
+		if _, err := awaitManagerFuture(t, manager.Submit(context.Background(), managerDesired("new", 1))); !errors.Is(err, concurrency.ErrClosed) {
+			t.Fatalf("post-close future error = %v, want ErrClosed", err)
+		}
+		synctest.Wait()
 		select {
-		case <-release:
-			return managerResult(desired, "done"), nil
-		case <-ctx.Done():
-			activeCanceled <- context.Cause(ctx)
-			return Result[string]{}, context.Cause(ctx)
+		case cause := <-activeCanceled:
+			t.Fatalf("active work canceled during graceful close: %v", cause)
+		default:
+		}
+		select {
+		case err := <-closed:
+			t.Fatalf("Close returned before active work finished: %v", err)
+		default:
+		}
+		close(release)
+		if _, err := awaitManagerFuture(t, active); err != nil {
+			t.Fatalf("active future error = %v", err)
+		}
+		if err := receiveError(t, closed, "graceful close"); err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+		if err := manager.Close(context.Background()); err != nil {
+			t.Fatalf("second Close() error = %v", err)
 		}
 	})
-	manager, err := NewManager(reconciler, 1, cloneManagerSpec)
-	if err != nil {
-		t.Fatalf("NewManager() error = %v", err)
-	}
-	active := manager.Submit(context.Background(), managerDesired("active", 1))
-	receiveSignal(t, started, "active reconciliation")
-	pending := manager.Submit(context.Background(), managerDesired("pending", 1))
-	closed := make(chan error, 1)
-	go func() { closed <- manager.Close(context.Background()) }()
-	if _, err := awaitManagerFuture(t, pending); !errors.Is(err, concurrency.ErrClosed) {
-		t.Fatalf("pending future error = %v, want ErrClosed", err)
-	}
-	if _, err := awaitManagerFuture(t, manager.Submit(context.Background(), managerDesired("new", 1))); !errors.Is(err, concurrency.ErrClosed) {
-		t.Fatalf("post-close future error = %v, want ErrClosed", err)
-	}
-	select {
-	case cause := <-activeCanceled:
-		t.Fatalf("active work canceled during graceful close: %v", cause)
-	default:
-	}
-	select {
-	case err := <-closed:
-		t.Fatalf("Close returned before active work finished: %v", err)
-	default:
-	}
-	close(release)
-	if _, err := awaitManagerFuture(t, active); err != nil {
-		t.Fatalf("active future error = %v", err)
-	}
-	if err := receiveError(t, closed, "graceful close"); err != nil {
-		t.Fatalf("Close() error = %v", err)
-	}
-	if err := manager.Close(context.Background()); err != nil {
-		t.Fatalf("second Close() error = %v", err)
-	}
 }
 
 func TestManagerCloseDeadlineCancelsActiveWorkAndResolvesEveryFuture(t *testing.T) {
-	started := make(chan struct{})
-	reconciler := reconcilerFunc[managerSpec, string](func(ctx context.Context, _ Desired[managerSpec]) (Result[string], error) {
-		close(started)
-		<-ctx.Done()
-		return Result[string]{}, context.Cause(ctx)
+	synctest.Test(t, func(t *testing.T) {
+		started := make(chan struct{})
+		reconciler := reconcilerFunc[managerSpec, string](func(ctx context.Context, _ Desired[managerSpec]) (Result[string], error) {
+			close(started)
+			<-ctx.Done()
+			return Result[string]{}, context.Cause(ctx)
+		})
+		manager, err := NewManager(reconciler, 1, cloneManagerSpec)
+		if err != nil {
+			t.Fatalf("NewManager() error = %v", err)
+		}
+		active := manager.Submit(context.Background(), managerDesired("active", 1))
+		receiveSignal(t, started, "active reconciliation")
+		pending := manager.Submit(context.Background(), managerDesired("pending", 1))
+		shutdown, cancelShutdown := context.WithCancelCause(context.Background())
+		shutdownCause := errors.New("shutdown expired")
+		cancelShutdown(shutdownCause)
+		if err := manager.Close(shutdown); !errors.Is(err, shutdownCause) {
+			t.Fatalf("Close() error = %v, want shutdown cause", err)
+		}
+		if _, err := awaitManagerFuture(t, active); !errors.Is(err, shutdownCause) {
+			t.Fatalf("active future error = %v, want shutdown cause", err)
+		}
+		if _, err := awaitManagerFuture(t, pending); !errors.Is(err, concurrency.ErrClosed) {
+			t.Fatalf("pending future error = %v, want ErrClosed", err)
+		}
+		if err := manager.Close(context.Background()); !errors.Is(err, shutdownCause) {
+			t.Fatalf("second Close() error = %v, want original shutdown cause", err)
+		}
 	})
-	manager, err := NewManager(reconciler, 1, cloneManagerSpec)
-	if err != nil {
-		t.Fatalf("NewManager() error = %v", err)
-	}
-	active := manager.Submit(context.Background(), managerDesired("active", 1))
-	receiveSignal(t, started, "active reconciliation")
-	pending := manager.Submit(context.Background(), managerDesired("pending", 1))
-	shutdown, cancelShutdown := context.WithCancelCause(context.Background())
-	shutdownCause := errors.New("shutdown expired")
-	cancelShutdown(shutdownCause)
-	if err := manager.Close(shutdown); !errors.Is(err, shutdownCause) {
-		t.Fatalf("Close() error = %v, want shutdown cause", err)
-	}
-	if _, err := awaitManagerFuture(t, active); !errors.Is(err, shutdownCause) {
-		t.Fatalf("active future error = %v, want shutdown cause", err)
-	}
-	if _, err := awaitManagerFuture(t, pending); !errors.Is(err, concurrency.ErrClosed) {
-		t.Fatalf("pending future error = %v, want ErrClosed", err)
-	}
-	if err := manager.Close(context.Background()); !errors.Is(err, shutdownCause) {
-		t.Fatalf("second Close() error = %v, want original shutdown cause", err)
-	}
 }
 
 func TestManagerConcurrentCloseDeadlinesUseOneShutdownCause(t *testing.T) {
-	started := make(chan struct{})
-	observedCause := make(chan error, 1)
-	release := make(chan struct{})
-	reconciler := reconcilerFunc[managerSpec, string](func(ctx context.Context, _ Desired[managerSpec]) (Result[string], error) {
-		close(started)
-		<-ctx.Done()
-		observedCause <- context.Cause(ctx)
-		<-release
-		return Result[string]{}, context.Cause(ctx)
+	synctest.Test(t, func(t *testing.T) {
+		started := make(chan struct{})
+		observedCause := make(chan error, 1)
+		release := make(chan struct{})
+		reconciler := reconcilerFunc[managerSpec, string](func(ctx context.Context, _ Desired[managerSpec]) (Result[string], error) {
+			close(started)
+			<-ctx.Done()
+			observedCause <- context.Cause(ctx)
+			<-release
+			return Result[string]{}, context.Cause(ctx)
+		})
+		manager, err := NewManager(reconciler, 1, cloneManagerSpec)
+		if err != nil {
+			t.Fatalf("NewManager() error = %v", err)
+		}
+		active := manager.Submit(context.Background(), managerDesired("active", 1))
+		receiveSignal(t, started, "active reconciliation")
+
+		firstCause := errors.New("first shutdown expired")
+		first, cancelFirst := context.WithCancelCause(context.Background())
+		cancelFirst(firstCause)
+		secondCause := errors.New("second shutdown expired")
+		second, cancelSecond := context.WithCancelCause(context.Background())
+		cancelSecond(secondCause)
+		gate := make(chan struct{})
+		closeResults := make(chan error, 2)
+		for _, closeContext := range []context.Context{first, second} {
+			closeContext := closeContext
+			go func() {
+				<-gate
+				closeResults <- manager.Close(closeContext)
+			}()
+		}
+		close(gate)
+
+		firstResult := receiveError(t, closeResults, "first concurrent close")
+		secondResult := receiveError(t, closeResults, "second concurrent close")
+		if firstResult == nil || secondResult == nil {
+			t.Fatalf("Close() errors = %v and %v, want one shutdown cause", firstResult, secondResult)
+		}
+		if !errors.Is(firstResult, secondResult) {
+			t.Fatalf("Close() errors selected different causes: %v and %v", firstResult, secondResult)
+		}
+		selectedCause := firstResult
+		if cause := receiveError(t, observedCause, "manager cancellation cause"); !errors.Is(cause, selectedCause) {
+			t.Fatalf("manager context cause = %v, want %v", cause, selectedCause)
+		}
+		if _, err := awaitManagerFuture(t, active); !errors.Is(err, selectedCause) {
+			t.Fatalf("active future error = %v, want %v", err, selectedCause)
+		}
+		close(release)
+		if err := manager.Close(context.Background()); !errors.Is(err, selectedCause) {
+			t.Fatalf("retained Close() error = %v, want %v", err, selectedCause)
+		}
 	})
-	manager, err := NewManager(reconciler, 1, cloneManagerSpec)
-	if err != nil {
-		t.Fatalf("NewManager() error = %v", err)
-	}
-	active := manager.Submit(context.Background(), managerDesired("active", 1))
-	receiveSignal(t, started, "active reconciliation")
-
-	firstCause := errors.New("first shutdown expired")
-	first, cancelFirst := context.WithCancelCause(context.Background())
-	cancelFirst(firstCause)
-	secondCause := errors.New("second shutdown expired")
-	second, cancelSecond := context.WithCancelCause(context.Background())
-	cancelSecond(secondCause)
-	gate := make(chan struct{})
-	closeResults := make(chan error, 2)
-	for _, closeContext := range []context.Context{first, second} {
-		closeContext := closeContext
-		go func() {
-			<-gate
-			closeResults <- manager.Close(closeContext)
-		}()
-	}
-	close(gate)
-
-	firstResult := receiveError(t, closeResults, "first concurrent close")
-	secondResult := receiveError(t, closeResults, "second concurrent close")
-	if firstResult == nil || secondResult == nil {
-		t.Fatalf("Close() errors = %v and %v, want one shutdown cause", firstResult, secondResult)
-	}
-	if !errors.Is(firstResult, secondResult) {
-		t.Fatalf("Close() errors selected different causes: %v and %v", firstResult, secondResult)
-	}
-	selectedCause := firstResult
-	if cause := receiveError(t, observedCause, "manager cancellation cause"); !errors.Is(cause, selectedCause) {
-		t.Fatalf("manager context cause = %v, want %v", cause, selectedCause)
-	}
-	if _, err := awaitManagerFuture(t, active); !errors.Is(err, selectedCause) {
-		t.Fatalf("active future error = %v, want %v", err, selectedCause)
-	}
-	close(release)
-	if err := manager.Close(context.Background()); !errors.Is(err, selectedCause) {
-		t.Fatalf("retained Close() error = %v, want %v", err, selectedCause)
-	}
 }
 
 func TestManagerLaterCloseReturnsSelectedCauseBeforeActiveCallExits(t *testing.T) {
-	started := make(chan struct{})
-	release := make(chan struct{})
-	reconciler := reconcilerFunc[managerSpec, string](func(ctx context.Context, _ Desired[managerSpec]) (Result[string], error) {
-		close(started)
-		<-ctx.Done()
-		<-release
-		return Result[string]{}, context.Cause(ctx)
-	})
-	manager, err := NewManager(reconciler, 1, cloneManagerSpec)
-	if err != nil {
-		t.Fatalf("NewManager() error = %v", err)
-	}
-	manager.Submit(context.Background(), managerDesired("active", 1))
-	receiveSignal(t, started, "active reconciliation")
-
-	shutdownCause := errors.New("shutdown expired")
-	shutdown, cancelShutdown := context.WithCancelCause(context.Background())
-	cancelShutdown(shutdownCause)
-	if err := manager.Close(shutdown); !errors.Is(err, shutdownCause) {
-		t.Fatalf("Close() error = %v, want shutdown cause", err)
-	}
-
-	closedAgain := make(chan error, 1)
-	go func() { closedAgain <- manager.Close(context.Background()) }()
-	select {
-	case err := <-closedAgain:
-		if !errors.Is(err, shutdownCause) {
-			close(release)
-			t.Fatalf("second Close() error = %v, want original shutdown cause", err)
+	synctest.Test(t, func(t *testing.T) {
+		started := make(chan struct{})
+		release := make(chan struct{})
+		reconciler := reconcilerFunc[managerSpec, string](func(ctx context.Context, _ Desired[managerSpec]) (Result[string], error) {
+			close(started)
+			<-ctx.Done()
+			<-release
+			return Result[string]{}, context.Cause(ctx)
+		})
+		manager, err := NewManager(reconciler, 1, cloneManagerSpec)
+		if err != nil {
+			t.Fatalf("NewManager() error = %v", err)
 		}
-	case <-time.After(time.Second):
+		manager.Submit(context.Background(), managerDesired("active", 1))
+		receiveSignal(t, started, "active reconciliation")
+
+		shutdownCause := errors.New("shutdown expired")
+		shutdown, cancelShutdown := context.WithCancelCause(context.Background())
+		cancelShutdown(shutdownCause)
+		if err := manager.Close(shutdown); !errors.Is(err, shutdownCause) {
+			t.Fatalf("Close() error = %v, want shutdown cause", err)
+		}
+
+		closedAgain := make(chan error, 1)
+		go func() { closedAgain <- manager.Close(context.Background()) }()
+		synctest.Wait()
+		select {
+		case err := <-closedAgain:
+			if !errors.Is(err, shutdownCause) {
+				close(release)
+				t.Fatalf("second Close() error = %v, want original shutdown cause", err)
+			}
+		default:
+			close(release)
+			<-closedAgain
+			t.Fatal("second Close() blocked until the active reconciliation exited")
+		}
 		close(release)
-		<-closedAgain
-		t.Fatal("second Close() blocked until the active reconciliation exited")
-	}
-	close(release)
+	})
 }
 
 func TestManagerWaitingCloseObservesSelectedShutdownCause(t *testing.T) {
-	started := make(chan struct{})
-	release := make(chan struct{})
-	reconciler := reconcilerFunc[managerSpec, string](func(ctx context.Context, _ Desired[managerSpec]) (Result[string], error) {
-		close(started)
-		<-ctx.Done()
-		<-release
-		return Result[string]{}, context.Cause(ctx)
-	})
-	manager, err := NewManager(reconciler, 1, cloneManagerSpec)
-	if err != nil {
-		t.Fatalf("NewManager() error = %v", err)
-	}
-	manager.Submit(context.Background(), managerDesired("active", 1))
-	receiveSignal(t, started, "active reconciliation")
-
-	waitingClose := make(chan error, 1)
-	go func() { waitingClose <- manager.Close(context.Background()) }()
-	if _, err := awaitManagerFuture(t, manager.Submit(context.Background(), managerDesired("probe", 1))); !errors.Is(err, concurrency.ErrClosed) {
-		close(release)
-		t.Fatalf("post-close future error = %v, want ErrClosed", err)
-	}
-
-	shutdownCause := errors.New("shutdown expired")
-	shutdown, cancelShutdown := context.WithCancelCause(context.Background())
-	cancelShutdown(shutdownCause)
-	if err := manager.Close(shutdown); !errors.Is(err, shutdownCause) {
-		close(release)
-		t.Fatalf("deadline Close() error = %v, want shutdown cause", err)
-	}
-
-	select {
-	case err := <-waitingClose:
-		if !errors.Is(err, shutdownCause) {
-			close(release)
-			t.Fatalf("waiting Close() error = %v, want selected shutdown cause", err)
+	synctest.Test(t, func(t *testing.T) {
+		started := make(chan struct{})
+		release := make(chan struct{})
+		reconciler := reconcilerFunc[managerSpec, string](func(ctx context.Context, _ Desired[managerSpec]) (Result[string], error) {
+			close(started)
+			<-ctx.Done()
+			<-release
+			return Result[string]{}, context.Cause(ctx)
+		})
+		manager, err := NewManager(reconciler, 1, cloneManagerSpec)
+		if err != nil {
+			t.Fatalf("NewManager() error = %v", err)
 		}
-	case <-time.After(time.Second):
+		manager.Submit(context.Background(), managerDesired("active", 1))
+		receiveSignal(t, started, "active reconciliation")
+
+		waitingClose := make(chan error, 1)
+		go func() { waitingClose <- manager.Close(context.Background()) }()
+		if _, err := awaitManagerFuture(t, manager.Submit(context.Background(), managerDesired("probe", 1))); !errors.Is(err, concurrency.ErrClosed) {
+			close(release)
+			t.Fatalf("post-close future error = %v, want ErrClosed", err)
+		}
+
+		shutdownCause := errors.New("shutdown expired")
+		shutdown, cancelShutdown := context.WithCancelCause(context.Background())
+		cancelShutdown(shutdownCause)
+		if err := manager.Close(shutdown); !errors.Is(err, shutdownCause) {
+			close(release)
+			t.Fatalf("deadline Close() error = %v, want shutdown cause", err)
+		}
+
+		synctest.Wait()
+		select {
+		case err := <-waitingClose:
+			if !errors.Is(err, shutdownCause) {
+				close(release)
+				t.Fatalf("waiting Close() error = %v, want selected shutdown cause", err)
+			}
+		default:
+			close(release)
+			<-waitingClose
+			t.Fatal("waiting Close() did not observe the selected shutdown cause")
+		}
 		close(release)
-		<-waitingClose
-		t.Fatal("waiting Close() did not observe the selected shutdown cause")
-	}
-	close(release)
+	})
 }
 
 func TestManagerSubmitContextOnlyControlsAdmission(t *testing.T) {
-	started := make(chan struct{})
-	release := make(chan struct{})
-	reconciler := reconcilerFunc[managerSpec, string](func(ctx context.Context, desired Desired[managerSpec]) (Result[string], error) {
-		close(started)
-		select {
-		case <-release:
-			return managerResult(desired, "done"), nil
-		case <-ctx.Done():
-			return Result[string]{}, context.Cause(ctx)
+	synctest.Test(t, func(t *testing.T) {
+		started := make(chan struct{})
+		release := make(chan struct{})
+		reconciler := reconcilerFunc[managerSpec, string](func(ctx context.Context, desired Desired[managerSpec]) (Result[string], error) {
+			close(started)
+			select {
+			case <-release:
+				return managerResult(desired, "done"), nil
+			case <-ctx.Done():
+				return Result[string]{}, context.Cause(ctx)
+			}
+		})
+		manager, err := NewManager(reconciler, 1, cloneManagerSpec)
+		if err != nil {
+			t.Fatalf("NewManager() error = %v", err)
+		}
+		canceled, cancel := context.WithCancel(context.Background())
+		cancel()
+		if _, err := awaitManagerFuture(t, manager.Submit(canceled, managerDesired("rejected", 1))); !errors.Is(err, context.Canceled) {
+			t.Fatalf("canceled admission error = %v, want context.Canceled", err)
+		}
+		admission, cancelAdmission := context.WithCancel(context.Background())
+		accepted := manager.Submit(admission, managerDesired("accepted", 1))
+		cancelAdmission()
+		receiveSignal(t, started, "accepted reconciliation")
+		close(release)
+		if result, err := awaitManagerFuture(t, accepted); err != nil || result.Key != "accepted" {
+			t.Fatalf("accepted future = (%#v, %v)", result, err)
+		}
+		if err := manager.Close(context.Background()); err != nil {
+			t.Fatalf("Close() error = %v", err)
 		}
 	})
-	manager, err := NewManager(reconciler, 1, cloneManagerSpec)
-	if err != nil {
-		t.Fatalf("NewManager() error = %v", err)
-	}
-	canceled, cancel := context.WithCancel(context.Background())
-	cancel()
-	if _, err := awaitManagerFuture(t, manager.Submit(canceled, managerDesired("rejected", 1))); !errors.Is(err, context.Canceled) {
-		t.Fatalf("canceled admission error = %v, want context.Canceled", err)
-	}
-	admission, cancelAdmission := context.WithCancel(context.Background())
-	accepted := manager.Submit(admission, managerDesired("accepted", 1))
-	cancelAdmission()
-	receiveSignal(t, started, "accepted reconciliation")
-	close(release)
-	if result, err := awaitManagerFuture(t, accepted); err != nil || result.Key != "accepted" {
-		t.Fatalf("accepted future = (%#v, %v)", result, err)
-	}
-	if err := manager.Close(context.Background()); err != nil {
-		t.Fatalf("Close() error = %v", err)
-	}
 }
 
-type managerTimer struct {
-	deadline time.Time
-	channel  chan time.Time
-}
-
-type managerClock struct {
-	mu     sync.Mutex
-	start  time.Time
-	now    time.Time
-	timers []managerTimer
-}
-
-func newManagerClock(now time.Time) *managerClock {
-	return &managerClock{start: now, now: now}
-}
-
-func (clock *managerClock) Start() time.Time {
-	return clock.start
-}
-
-func (clock *managerClock) Now() time.Time {
-	clock.mu.Lock()
-	defer clock.mu.Unlock()
-	return clock.now
-}
-
-func (clock *managerClock) After(delay time.Duration) <-chan time.Time {
-	clock.mu.Lock()
-	defer clock.mu.Unlock()
-	channel := make(chan time.Time, 1)
-	clock.timers = append(clock.timers, managerTimer{deadline: clock.now.Add(delay), channel: channel})
-	return channel
-}
-
-func (clock *managerClock) Advance(duration time.Duration) {
-	clock.mu.Lock()
-	clock.now = clock.now.Add(duration)
-	now := clock.now
-	pending := clock.timers[:0]
-	for _, timer := range clock.timers {
-		if timer.deadline.After(now) {
-			pending = append(pending, timer)
-			continue
-		}
-		timer.channel <- now
-	}
-	clock.timers = pending
-	clock.mu.Unlock()
-}
-
+// The receive and await helpers below run inside synctest bubbles. Their
+// timeouts are virtual: they fire only when every goroutine in the bubble is
+// blocked, turning a deadlock into a test failure without real waiting.
 func receiveManagerCall[T any](t *testing.T, channel <-chan T) T {
 	t.Helper()
 	select {
@@ -803,18 +789,16 @@ func awaitManagerFuture[O any](t *testing.T, future *concurrency.Future[Result[O
 	return future.Await(ctx)
 }
 
+// waitForManagerPending must run inside a synctest bubble: it waits until
+// every other goroutine in the bubble is blocked and then inspects Pending.
 func waitForManagerPending[S, O any](t *testing.T, manager *Manager[S, O], count int) []Pending[S] {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		pending := manager.Pending()
-		if len(pending) == count {
-			return pending
-		}
-		time.Sleep(time.Millisecond)
+	synctest.Wait()
+	pending := manager.Pending()
+	if len(pending) != count {
+		t.Fatalf("Pending() length = %d, want %d", len(pending), count)
 	}
-	t.Fatalf("Pending() never reached length %d", count)
-	return nil
+	return pending
 }
 
 func sameKeys(left, right []Key) bool {
@@ -822,5 +806,3 @@ func sameKeys(left, right []Key) bool {
 	slices.Sort(right)
 	return slices.Equal(left, right)
 }
-
-var _ ManagerClock = (*managerClock)(nil)

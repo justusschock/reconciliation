@@ -7,6 +7,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/justusschock/go-concurrency"
@@ -147,66 +148,70 @@ func TestEnginePublishesRollbackAndFailure(t *testing.T) {
 }
 
 func TestManagerPublishesQueuedBeforeEnginePhases(t *testing.T) {
-	sink := &recordingStatusSink{}
-	adapter := &engineAdapter{
-		observe: constantObservation(1),
-		plan: func(context.Context, Desired[engineSpec], engineObserved) (Plan[engineAction], error) {
-			return Plan[engineAction]{}, nil
-		},
-		apply: unexpectedApply(t),
-		undo:  unexpectedUndo(t),
-	}
-	manager, err := NewManager[engineSpec, engineObserved](
-		NewEngine(adapter, enginePolicy(1)),
-		1,
-		func(spec engineSpec) engineSpec { return spec },
-		WithManagerStatusSink(sink),
-	)
-	if err != nil {
-		t.Fatalf("NewManager() error = %v", err)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		sink := &recordingStatusSink{}
+		adapter := &engineAdapter{
+			observe: constantObservation(1),
+			plan: func(context.Context, Desired[engineSpec], engineObserved) (Plan[engineAction], error) {
+				return Plan[engineAction]{}, nil
+			},
+			apply: unexpectedApply(t),
+			undo:  unexpectedUndo(t),
+		}
+		manager, err := NewManager[engineSpec, engineObserved](
+			NewEngine(adapter, enginePolicy(1)),
+			1,
+			func(spec engineSpec) engineSpec { return spec },
+			WithManagerStatusSink(sink),
+		)
+		if err != nil {
+			t.Fatalf("NewManager() error = %v", err)
+		}
 
-	future := manager.Submit(context.Background(), engineDesired())
-	if _, err := awaitManagerFuture(t, future); err != nil {
-		t.Fatalf("future error = %v", err)
-	}
-	if err := manager.Close(context.Background()); err != nil {
-		t.Fatalf("Close() error = %v", err)
-	}
-	want := []StatusPhase{StatusQueued, StatusObserving, StatusPlanning, StatusObserving, StatusSucceeded}
-	if got := statusPhases(sink.Events()); !slices.Equal(got, want) {
-		t.Fatalf("status phases = %v, want %v", got, want)
-	}
+		future := manager.Submit(context.Background(), engineDesired())
+		if _, err := awaitManagerFuture(t, future); err != nil {
+			t.Fatalf("future error = %v", err)
+		}
+		if err := manager.Close(context.Background()); err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+		want := []StatusPhase{StatusQueued, StatusObserving, StatusPlanning, StatusObserving, StatusSucceeded}
+		if got := statusPhases(sink.Events()); !slices.Equal(got, want) {
+			t.Fatalf("status phases = %v, want %v", got, want)
+		}
+	})
 }
 
 func TestManagerDoesNotStartBeforeInitialQueuedPublicationCompletes(t *testing.T) {
-	sink := &gatedQueuedSink{entered: make(chan struct{}), release: make(chan struct{})}
-	reconciler := reconcilerFunc[managerSpec, string](func(_ context.Context, desired Desired[managerSpec]) (Result[string], error) {
-		return managerResult(desired, "done"), nil
-	})
-	manager, err := NewManager(reconciler, 1, cloneManagerSpec, WithManagerStatusSink(sink))
-	if err != nil {
-		t.Fatalf("NewManager() error = %v", err)
-	}
-	firstSubmitted := make(chan *concurrency.Future[Result[string]], 1)
-	go func() {
-		firstSubmitted <- manager.Submit(context.Background(), managerDesired("target", 1))
-	}()
-	receiveSignal(t, sink.entered, "initial queued publication")
-	second := manager.Submit(context.Background(), managerDesired("target", 1))
-	if pending := manager.Pending(); len(pending) != 1 {
-		t.Fatalf("Pending() length = %d, want work held until initial queued publication completes", len(pending))
-	}
-	close(sink.release)
-	first := receiveManagerCall(t, firstSubmitted)
-	for name, future := range map[string]*concurrency.Future[Result[string]]{"first": first, "second": second} {
-		if _, err := awaitManagerFuture(t, future); err != nil {
-			t.Fatalf("%s future error = %v", name, err)
+	synctest.Test(t, func(t *testing.T) {
+		sink := &gatedQueuedSink{entered: make(chan struct{}), release: make(chan struct{})}
+		reconciler := reconcilerFunc[managerSpec, string](func(_ context.Context, desired Desired[managerSpec]) (Result[string], error) {
+			return managerResult(desired, "done"), nil
+		})
+		manager, err := NewManager(reconciler, 1, cloneManagerSpec, WithManagerStatusSink(sink))
+		if err != nil {
+			t.Fatalf("NewManager() error = %v", err)
 		}
-	}
-	if err := manager.Close(context.Background()); err != nil {
-		t.Fatalf("Close() error = %v", err)
-	}
+		firstSubmitted := make(chan *concurrency.Future[Result[string]], 1)
+		go func() {
+			firstSubmitted <- manager.Submit(context.Background(), managerDesired("target", 1))
+		}()
+		receiveSignal(t, sink.entered, "initial queued publication")
+		second := manager.Submit(context.Background(), managerDesired("target", 1))
+		if pending := manager.Pending(); len(pending) != 1 {
+			t.Fatalf("Pending() length = %d, want work held until initial queued publication completes", len(pending))
+		}
+		close(sink.release)
+		first := receiveManagerCall(t, firstSubmitted)
+		for name, future := range map[string]*concurrency.Future[Result[string]]{"first": first, "second": second} {
+			if _, err := awaitManagerFuture(t, future); err != nil {
+				t.Fatalf("%s future error = %v", name, err)
+			}
+		}
+		if err := manager.Close(context.Background()); err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+	})
 }
 
 type gatedQueuedSink struct {
@@ -226,82 +231,88 @@ func (sink *gatedQueuedSink) Publish(event StatusEvent) {
 }
 
 func TestEventStreamPublishesWithoutBlockingAndMarksDroppedEvents(t *testing.T) {
-	stream, err := NewEventStream(1)
-	if err != nil {
-		t.Fatalf("NewEventStream() error = %v", err)
-	}
-	events := stream.Subscribe()
-	published := make(chan struct{})
-	go func() {
-		for generation := Generation(1); generation <= 100; generation++ {
-			stream.Publish(StatusEvent{Key: "resource", Generation: generation, Phase: StatusQueued})
+	synctest.Test(t, func(t *testing.T) {
+		stream, err := NewEventStream(1)
+		if err != nil {
+			t.Fatalf("NewEventStream() error = %v", err)
 		}
-		close(published)
-	}()
-	receiveSignal(t, published, "non-blocking status publication")
-
-	foundMarker := false
-	deadline := time.After(5 * time.Second)
-	for !foundMarker {
-		select {
-		case event := <-events:
-			if event.Phase == StatusDropped {
-				if event.Dropped == 0 {
-					t.Fatalf("drop marker = %#v, want positive count", event)
-				}
-				foundMarker = true
+		events := stream.Subscribe()
+		published := make(chan struct{})
+		go func() {
+			for generation := Generation(1); generation <= 100; generation++ {
+				stream.Publish(StatusEvent{Key: "resource", Generation: generation, Phase: StatusQueued})
 			}
-		case <-deadline:
-			t.Fatal("slow subscriber never received a drop marker")
+			close(published)
+		}()
+		receiveSignal(t, published, "non-blocking status publication")
+
+		foundMarker := false
+		deadline := time.After(5 * time.Second)
+		for !foundMarker {
+			select {
+			case event := <-events:
+				if event.Phase == StatusDropped {
+					if event.Dropped == 0 {
+						t.Fatalf("drop marker = %#v, want positive count", event)
+					}
+					foundMarker = true
+				}
+			case <-deadline:
+				t.Fatal("slow subscriber never received a drop marker")
+			}
 		}
-	}
-	stream.Close()
-	stream.Close()
-	waitForStatusStreamClose(t, events)
+		stream.Close()
+		stream.Close()
+		waitForStatusStreamClose(t, events)
+	})
 }
 
 func TestEventStreamKeepsSubscribersIndependent(t *testing.T) {
-	stream, err := NewEventStream(2)
-	if err != nil {
-		t.Fatalf("NewEventStream() error = %v", err)
-	}
-	first := stream.Subscribe()
-	second := stream.Subscribe()
-	event := StatusEvent{Key: "resource", Generation: 1, Phase: StatusQueued}
-	stream.Publish(event)
-	if got := receiveStatusEvent(t, first); got != event {
-		t.Fatalf("first subscriber event = %#v", got)
-	}
-	if got := receiveStatusEvent(t, second); got != event {
-		t.Fatalf("second subscriber event = %#v", got)
-	}
-	stream.Close()
-	waitForStatusStreamClose(t, first)
-	waitForStatusStreamClose(t, second)
+	synctest.Test(t, func(t *testing.T) {
+		stream, err := NewEventStream(2)
+		if err != nil {
+			t.Fatalf("NewEventStream() error = %v", err)
+		}
+		first := stream.Subscribe()
+		second := stream.Subscribe()
+		event := StatusEvent{Key: "resource", Generation: 1, Phase: StatusQueued}
+		stream.Publish(event)
+		if got := receiveStatusEvent(t, first); got != event {
+			t.Fatalf("first subscriber event = %#v", got)
+		}
+		if got := receiveStatusEvent(t, second); got != event {
+			t.Fatalf("second subscriber event = %#v", got)
+		}
+		stream.Close()
+		waitForStatusStreamClose(t, first)
+		waitForStatusStreamClose(t, second)
+	})
 }
 
 func TestEventStreamConcurrentPublishAndCloseIsSafe(t *testing.T) {
-	stream, err := NewEventStream(4)
-	if err != nil {
-		t.Fatalf("NewEventStream() error = %v", err)
-	}
-	events := stream.Subscribe()
-	var publishers sync.WaitGroup
-	for publisher := 0; publisher < 8; publisher++ {
-		publishers.Add(1)
-		go func() {
-			defer publishers.Done()
-			for generation := Generation(1); generation <= 100; generation++ {
-				stream.Publish(StatusEvent{Key: "resource", Generation: generation, Phase: StatusApplying})
-			}
-		}()
-	}
-	stream.Close()
-	stream.Close()
-	publishers.Wait()
-	waitForStatusStreamClose(t, events)
-	afterClose := stream.Subscribe()
-	waitForStatusStreamClose(t, afterClose)
+	synctest.Test(t, func(t *testing.T) {
+		stream, err := NewEventStream(4)
+		if err != nil {
+			t.Fatalf("NewEventStream() error = %v", err)
+		}
+		events := stream.Subscribe()
+		var publishers sync.WaitGroup
+		for publisher := 0; publisher < 8; publisher++ {
+			publishers.Add(1)
+			go func() {
+				defer publishers.Done()
+				for generation := Generation(1); generation <= 100; generation++ {
+					stream.Publish(StatusEvent{Key: "resource", Generation: generation, Phase: StatusApplying})
+				}
+			}()
+		}
+		stream.Close()
+		stream.Close()
+		publishers.Wait()
+		waitForStatusStreamClose(t, events)
+		afterClose := stream.Subscribe()
+		waitForStatusStreamClose(t, afterClose)
+	})
 }
 
 func TestEventStreamRejectsUnboundedCapacity(t *testing.T) {

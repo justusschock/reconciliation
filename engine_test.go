@@ -7,6 +7,7 @@ import (
 	"slices"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -241,71 +242,79 @@ func TestEngineRetainsDependenciesOfResidualActions(t *testing.T) {
 }
 
 func TestEngineJoinsRollbackErrorsAndDoesNotRetry(t *testing.T) {
-	wantApplyErr := Transient(errors.New("apply failed"))
-	wantUndoErr := errors.New("undo failed")
-	var applied []ActionID
-	var undone []Undo[engineUndo]
-	adapter := rollbackAdapter(&applied, &undone, wantApplyErr, wantUndoErr, true)
-	clock := &recordingClock{immediate: true}
+	synctest.Test(t, func(t *testing.T) {
+		wantApplyErr := Transient(errors.New("apply failed"))
+		wantUndoErr := errors.New("undo failed")
+		var applied []ActionID
+		var undone []Undo[engineUndo]
+		adapter := rollbackAdapter(&applied, &undone, wantApplyErr, wantUndoErr, true)
+		policy := Policy{MaxAttempts: 3, BaseDelay: time.Second, MaxDelay: time.Second}
+		start := time.Now()
 
-	result, err := NewEngine(adapter, enginePolicy(3), WithClock(clock)).Reconcile(context.Background(), engineDesired())
-	if !errors.Is(err, wantApplyErr) || !errors.Is(err, wantUndoErr) {
-		t.Fatalf("Reconcile() error = %v, want apply and undo errors", err)
-	}
-	if len(applied) != 3 || len(undone) != 1 || undone[0].ActionID != "b" || len(clock.Delays()) != 0 {
-		t.Fatalf("rollback/retry mismatch: applied=%v undone=%v delays=%v", applied, undone, clock.Delays())
-	}
-	if !result.Changed {
-		t.Fatalf("failed rollback result = %#v, want Changed=true", result)
-	}
+		result, err := NewEngine(adapter, policy).Reconcile(context.Background(), engineDesired())
+		if !errors.Is(err, wantApplyErr) || !errors.Is(err, wantUndoErr) {
+			t.Fatalf("Reconcile() error = %v, want apply and undo errors", err)
+		}
+		if elapsed := time.Since(start); len(applied) != 3 || len(undone) != 1 || undone[0].ActionID != "b" || elapsed != 0 {
+			t.Fatalf("rollback/retry mismatch: applied=%v undone=%v waited=%v", applied, undone, elapsed)
+		}
+		if !result.Changed {
+			t.Fatalf("failed rollback result = %#v, want Changed=true", result)
+		}
+	})
 }
 
 func TestEngineRetriesAfterSuccessfulRollback(t *testing.T) {
-	wantTransient := Transient(errors.New("temporary apply failure"))
-	observations := 0
-	plans := 0
-	var applied []ActionID
-	var undone []ActionID
-	adapter := &engineAdapter{
-		observe: func(context.Context, Key) (engineObserved, error) {
-			observations++
-			return engineObserved(observations), nil
-		},
-		plan: func(context.Context, Desired[engineSpec], engineObserved) (Plan[engineAction], error) {
-			plans++
-			if plans > 1 {
-				return Plan[engineAction]{}, nil
-			}
-			return Plan[engineAction]{Actions: []Action[engineAction]{
-				{ID: "a", Value: "A", Reversible: true},
-				{ID: "b", DependsOn: []ActionID{"a"}, Value: "B", Reversible: true},
-			}}, nil
-		},
-		apply: func(_ context.Context, action Action[engineAction]) (Undo[engineUndo], error) {
-			applied = append(applied, action.ID)
-			if action.ID == "b" {
-				return Undo[engineUndo]{}, wantTransient
-			}
-			return Undo[engineUndo]{Value: "undo-a"}, nil
-		},
-		undo: func(_ context.Context, undo Undo[engineUndo]) error {
-			undone = append(undone, undo.ActionID)
-			return nil
-		},
-	}
-	clock := &recordingClock{immediate: true}
-	policy := Policy{MaxAttempts: 2, BaseDelay: time.Millisecond, MaxDelay: time.Millisecond}
+	synctest.Test(t, func(t *testing.T) {
+		wantTransient := Transient(errors.New("temporary apply failure"))
+		observations := 0
+		plans := 0
+		var applied []ActionID
+		var undone []ActionID
+		adapter := &engineAdapter{
+			observe: func(context.Context, Key) (engineObserved, error) {
+				observations++
+				return engineObserved(observations), nil
+			},
+			plan: func(context.Context, Desired[engineSpec], engineObserved) (Plan[engineAction], error) {
+				plans++
+				if plans > 1 {
+					return Plan[engineAction]{}, nil
+				}
+				return Plan[engineAction]{Actions: []Action[engineAction]{
+					{ID: "a", Value: "A", Reversible: true},
+					{ID: "b", DependsOn: []ActionID{"a"}, Value: "B", Reversible: true},
+				}}, nil
+			},
+			apply: func(_ context.Context, action Action[engineAction]) (Undo[engineUndo], error) {
+				applied = append(applied, action.ID)
+				if action.ID == "b" {
+					return Undo[engineUndo]{}, wantTransient
+				}
+				return Undo[engineUndo]{Value: "undo-a"}, nil
+			},
+			undo: func(_ context.Context, undo Undo[engineUndo]) error {
+				undone = append(undone, undo.ActionID)
+				return nil
+			},
+		}
+		policy := Policy{MaxAttempts: 2, BaseDelay: time.Millisecond, MaxDelay: time.Millisecond}
+		start := time.Now()
 
-	result, err := NewEngine(adapter, policy, WithClock(clock)).Reconcile(context.Background(), engineDesired())
-	if err != nil {
-		t.Fatalf("Reconcile() error = %v", err)
-	}
-	if !slices.Equal(applied, []ActionID{"a", "b"}) || !slices.Equal(undone, []ActionID{"a"}) {
-		t.Fatalf("applied=%v undone=%v", applied, undone)
-	}
-	if plans != 2 || observations != 3 || result.Observed != 3 || result.Changed {
-		t.Fatalf("plans=%d observations=%d result=%#v", plans, observations, result)
-	}
+		result, err := NewEngine(adapter, policy).Reconcile(context.Background(), engineDesired())
+		if err != nil {
+			t.Fatalf("Reconcile() error = %v", err)
+		}
+		if elapsed := time.Since(start); elapsed != time.Millisecond {
+			t.Fatalf("retry wait = %v, want %v", elapsed, time.Millisecond)
+		}
+		if !slices.Equal(applied, []ActionID{"a", "b"}) || !slices.Equal(undone, []ActionID{"a"}) {
+			t.Fatalf("applied=%v undone=%v", applied, undone)
+		}
+		if plans != 2 || observations != 3 || result.Observed != 3 || result.Changed {
+			t.Fatalf("plans=%d observations=%d result=%#v", plans, observations, result)
+		}
+	})
 }
 
 func TestEngineCarriesResidualChangeAcrossRetries(t *testing.T) {
@@ -331,9 +340,7 @@ func TestEngineCarriesResidualChangeAcrossRetries(t *testing.T) {
 		},
 		undo: unexpectedUndo(t),
 	}
-	clock := &recordingClock{immediate: true}
-
-	result, err := NewEngine(adapter, enginePolicy(2), WithClock(clock)).Reconcile(context.Background(), engineDesired())
+	result, err := NewEngine(adapter, enginePolicy(2)).Reconcile(context.Background(), engineDesired())
 	if err != nil {
 		t.Fatalf("Reconcile() error = %v", err)
 	}
@@ -343,37 +350,39 @@ func TestEngineCarriesResidualChangeAcrossRetries(t *testing.T) {
 }
 
 func TestEngineRetriesClassifiedFailureWithFreshState(t *testing.T) {
-	wantConflict := Conflict(errors.New("stale observation"))
-	observations := 0
-	plans := 0
-	adapter := &engineAdapter{
-		observe: func(context.Context, Key) (engineObserved, error) {
-			observations++
-			return engineObserved(observations), nil
-		},
-		plan: func(context.Context, Desired[engineSpec], engineObserved) (Plan[engineAction], error) {
-			plans++
-			if plans == 1 {
-				return Plan[engineAction]{}, wantConflict
-			}
-			return Plan[engineAction]{}, nil
-		},
-		apply: unexpectedApply(t),
-		undo:  unexpectedUndo(t),
-	}
-	clock := &recordingClock{immediate: true}
-	policy := Policy{MaxAttempts: 3, BaseDelay: 5 * time.Millisecond, MaxDelay: 20 * time.Millisecond}
+	synctest.Test(t, func(t *testing.T) {
+		wantConflict := Conflict(errors.New("stale observation"))
+		observations := 0
+		plans := 0
+		adapter := &engineAdapter{
+			observe: func(context.Context, Key) (engineObserved, error) {
+				observations++
+				return engineObserved(observations), nil
+			},
+			plan: func(context.Context, Desired[engineSpec], engineObserved) (Plan[engineAction], error) {
+				plans++
+				if plans == 1 {
+					return Plan[engineAction]{}, wantConflict
+				}
+				return Plan[engineAction]{}, nil
+			},
+			apply: unexpectedApply(t),
+			undo:  unexpectedUndo(t),
+		}
+		policy := Policy{MaxAttempts: 3, BaseDelay: 5 * time.Millisecond, MaxDelay: 20 * time.Millisecond}
+		start := time.Now()
 
-	result, err := NewEngine(adapter, policy, WithClock(clock)).Reconcile(context.Background(), engineDesired())
-	if err != nil {
-		t.Fatalf("Reconcile() error = %v", err)
-	}
-	if plans != 2 || observations != 3 || result.Observed != 3 {
-		t.Fatalf("fresh-state calls plan=%d observe=%d result=%#v", plans, observations, result)
-	}
-	if !slices.Equal(clock.Delays(), []time.Duration{5 * time.Millisecond}) {
-		t.Fatalf("retry delays = %v", clock.Delays())
-	}
+		result, err := NewEngine(adapter, policy).Reconcile(context.Background(), engineDesired())
+		if err != nil {
+			t.Fatalf("Reconcile() error = %v", err)
+		}
+		if plans != 2 || observations != 3 || result.Observed != 3 {
+			t.Fatalf("fresh-state calls plan=%d observe=%d result=%#v", plans, observations, result)
+		}
+		if elapsed := time.Since(start); elapsed != 5*time.Millisecond {
+			t.Fatalf("retry wait = %v, want %v", elapsed, 5*time.Millisecond)
+		}
+	})
 }
 
 func TestEngineDoesNotRetryPermanentOrUnclassifiedErrors(t *testing.T) {
@@ -395,50 +404,55 @@ func TestEngineDoesNotRetryPermanentOrUnclassifiedErrors(t *testing.T) {
 				apply: unexpectedApply(t),
 				undo:  unexpectedUndo(t),
 			}
-			clock := &recordingClock{immediate: true}
-			_, err := NewEngine(adapter, enginePolicy(3), WithClock(clock)).Reconcile(context.Background(), engineDesired())
-			if !errors.Is(err, test.err) || plans != 1 || len(clock.Delays()) != 0 {
-				t.Fatalf("Reconcile() error=%v plans=%d delays=%v", err, plans, clock.Delays())
+			_, err := NewEngine(adapter, enginePolicy(3)).Reconcile(context.Background(), engineDesired())
+			if !errors.Is(err, test.err) || plans != 1 {
+				t.Fatalf("Reconcile() error=%v plans=%d", err, plans)
 			}
 		})
 	}
 }
 
 func TestEngineAttemptTimeoutRollsBackWithParentContext(t *testing.T) {
-	var undone []Undo[engineUndo]
-	adapter := &engineAdapter{
-		observe: constantObservation(1),
-		plan: func(context.Context, Desired[engineSpec], engineObserved) (Plan[engineAction], error) {
-			return Plan[engineAction]{Actions: []Action[engineAction]{
-				{ID: "a", Value: "A", Reversible: true},
-				{ID: "b", DependsOn: []ActionID{"a"}, Value: "B", Reversible: true},
-			}}, nil
-		},
-		apply: func(ctx context.Context, action Action[engineAction]) (Undo[engineUndo], error) {
-			if action.ID == "b" {
-				<-ctx.Done()
-				return Undo[engineUndo]{}, context.Cause(ctx)
-			}
-			return Undo[engineUndo]{Value: engineUndo(action.Value)}, nil
-		},
-		undo: func(ctx context.Context, undo Undo[engineUndo]) error {
-			if err := context.Cause(ctx); err != nil {
-				t.Fatalf("rollback received canceled attempt context: %v", err)
-			}
-			undone = append(undone, undo)
-			return nil
-		},
-	}
-	policy := enginePolicy(2)
-	policy.AttemptTimeout = 10 * time.Millisecond
+	synctest.Test(t, func(t *testing.T) {
+		var undone []Undo[engineUndo]
+		adapter := &engineAdapter{
+			observe: constantObservation(1),
+			plan: func(context.Context, Desired[engineSpec], engineObserved) (Plan[engineAction], error) {
+				return Plan[engineAction]{Actions: []Action[engineAction]{
+					{ID: "a", Value: "A", Reversible: true},
+					{ID: "b", DependsOn: []ActionID{"a"}, Value: "B", Reversible: true},
+				}}, nil
+			},
+			apply: func(ctx context.Context, action Action[engineAction]) (Undo[engineUndo], error) {
+				if action.ID == "b" {
+					<-ctx.Done()
+					return Undo[engineUndo]{}, context.Cause(ctx)
+				}
+				return Undo[engineUndo]{Value: engineUndo(action.Value)}, nil
+			},
+			undo: func(ctx context.Context, undo Undo[engineUndo]) error {
+				if err := context.Cause(ctx); err != nil {
+					t.Fatalf("rollback received canceled attempt context: %v", err)
+				}
+				undone = append(undone, undo)
+				return nil
+			},
+		}
+		policy := enginePolicy(2)
+		policy.AttemptTimeout = 10 * time.Millisecond
+		start := time.Now()
 
-	result, err := NewEngine(adapter, policy).Reconcile(context.Background(), engineDesired())
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("Reconcile() error = %v, want deadline", err)
-	}
-	if len(undone) != 1 || undone[0].ActionID != "a" || result.Changed {
-		t.Fatalf("rollback=%#v result=%#v", undone, result)
-	}
+		result, err := NewEngine(adapter, policy).Reconcile(context.Background(), engineDesired())
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("Reconcile() error = %v, want deadline", err)
+		}
+		if elapsed := time.Since(start); elapsed != policy.AttemptTimeout {
+			t.Fatalf("attempt ran for %v, want %v", elapsed, policy.AttemptTimeout)
+		}
+		if len(undone) != 1 || undone[0].ActionID != "a" || result.Changed {
+			t.Fatalf("rollback=%#v result=%#v", undone, result)
+		}
+	})
 }
 
 func TestEngineParentCancellationDoesNotSuppressRollback(t *testing.T) {
@@ -479,71 +493,86 @@ func TestEngineParentCancellationDoesNotSuppressRollback(t *testing.T) {
 }
 
 func TestEngineBoundsRollbackAndPreservesCleanupDeadline(t *testing.T) {
-	wantApplyErr := errors.New("apply failed")
-	adapter := &engineAdapter{
-		observe: constantObservation(1),
-		plan: func(context.Context, Desired[engineSpec], engineObserved) (Plan[engineAction], error) {
-			return Plan[engineAction]{Actions: []Action[engineAction]{
-				{ID: "a", Value: "A", Reversible: true},
-				{ID: "b", DependsOn: []ActionID{"a"}, Value: "B", Reversible: true},
-			}}, nil
-		},
-		apply: func(_ context.Context, action Action[engineAction]) (Undo[engineUndo], error) {
-			if action.ID == "b" {
-				return Undo[engineUndo]{}, wantApplyErr
-			}
-			return Undo[engineUndo]{Value: engineUndo(action.Value)}, nil
-		},
-		undo: func(ctx context.Context, _ Undo[engineUndo]) error {
-			<-ctx.Done()
-			return context.Cause(ctx)
-		},
-	}
-	policy := enginePolicy(1)
-	policy.RollbackTimeout = 10 * time.Millisecond
+	synctest.Test(t, func(t *testing.T) {
+		wantApplyErr := errors.New("apply failed")
+		adapter := &engineAdapter{
+			observe: constantObservation(1),
+			plan: func(context.Context, Desired[engineSpec], engineObserved) (Plan[engineAction], error) {
+				return Plan[engineAction]{Actions: []Action[engineAction]{
+					{ID: "a", Value: "A", Reversible: true},
+					{ID: "b", DependsOn: []ActionID{"a"}, Value: "B", Reversible: true},
+				}}, nil
+			},
+			apply: func(_ context.Context, action Action[engineAction]) (Undo[engineUndo], error) {
+				if action.ID == "b" {
+					return Undo[engineUndo]{}, wantApplyErr
+				}
+				return Undo[engineUndo]{Value: engineUndo(action.Value)}, nil
+			},
+			undo: func(ctx context.Context, _ Undo[engineUndo]) error {
+				<-ctx.Done()
+				return context.Cause(ctx)
+			},
+		}
+		policy := enginePolicy(1)
+		policy.RollbackTimeout = 10 * time.Millisecond
+		start := time.Now()
 
-	result, err := NewEngine(adapter, policy).Reconcile(context.Background(), engineDesired())
-	if !errors.Is(err, wantApplyErr) || !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("Reconcile() error = %v, want apply and cleanup deadline", err)
-	}
-	if !result.Changed {
-		t.Fatalf("timed-out rollback result = %#v, want Changed=true", result)
-	}
+		result, err := NewEngine(adapter, policy).Reconcile(context.Background(), engineDesired())
+		if !errors.Is(err, wantApplyErr) || !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("Reconcile() error = %v, want apply and cleanup deadline", err)
+		}
+		if elapsed := time.Since(start); elapsed != policy.RollbackTimeout {
+			t.Fatalf("rollback ran for %v, want %v", elapsed, policy.RollbackTimeout)
+		}
+		if !result.Changed {
+			t.Fatalf("timed-out rollback result = %#v, want Changed=true", result)
+		}
+	})
 }
 
 func TestEngineCancellationInterruptsRetryWait(t *testing.T) {
-	wantFailure := Transient(errors.New("retry me"))
-	adapter := &engineAdapter{
-		observe: constantObservation(1),
-		plan: func(context.Context, Desired[engineSpec], engineObserved) (Plan[engineAction], error) {
-			return Plan[engineAction]{}, wantFailure
-		},
-		apply: unexpectedApply(t),
-		undo:  unexpectedUndo(t),
-	}
-	clock := &recordingClock{called: make(chan struct{}), block: true}
-	ctx, cancel := context.WithCancelCause(context.Background())
-	wantCancel := errors.New("stop retrying")
-	done := make(chan error, 1)
-	go func() {
-		_, err := NewEngine(adapter, Policy{MaxAttempts: 3, BaseDelay: time.Hour, MaxDelay: time.Hour}, WithClock(clock)).Reconcile(ctx, engineDesired())
-		done <- err
-	}()
-
-	select {
-	case <-clock.called:
-	case <-time.After(time.Second):
-		t.Fatal("engine did not enter retry wait")
-	}
-	cancel(wantCancel)
-	select {
-	case err := <-done:
-		if !errors.Is(err, wantCancel) {
-			t.Fatalf("Reconcile() error = %v, want cancellation cause", err)
+	synctest.Test(t, func(t *testing.T) {
+		wantFailure := Transient(errors.New("retry me"))
+		adapter := &engineAdapter{
+			observe: constantObservation(1),
+			plan: func(context.Context, Desired[engineSpec], engineObserved) (Plan[engineAction], error) {
+				return Plan[engineAction]{}, wantFailure
+			},
+			apply: unexpectedApply(t),
+			undo:  unexpectedUndo(t),
 		}
-	case <-time.After(time.Second):
-		t.Fatal("engine did not leave retry wait")
-	}
+		ctx, cancel := context.WithCancelCause(context.Background())
+		wantCancel := errors.New("stop retrying")
+		done := make(chan error, 1)
+		go func() {
+			_, err := NewEngine(adapter, Policy{MaxAttempts: 3, BaseDelay: time.Hour, MaxDelay: time.Hour}).Reconcile(ctx, engineDesired())
+			done <- err
+		}()
+
+		// Every goroutine in the bubble is now blocked; the engine sits in
+		// its one-hour retry wait.
+		synctest.Wait()
+		select {
+		case err := <-done:
+			t.Fatalf("Reconcile() returned before cancellation: %v", err)
+		default:
+		}
+		start := time.Now()
+		cancel(wantCancel)
+		synctest.Wait()
+		select {
+		case err := <-done:
+			if !errors.Is(err, wantCancel) {
+				t.Fatalf("Reconcile() error = %v, want cancellation cause", err)
+			}
+		default:
+			t.Fatal("engine did not leave retry wait")
+		}
+		if elapsed := time.Since(start); elapsed != 0 {
+			t.Fatalf("cancellation took %v of virtual time, want 0", elapsed)
+		}
+	})
 }
 
 func TestEngineRollsBackWhenFinalObservationFails(t *testing.T) {
