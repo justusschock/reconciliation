@@ -10,6 +10,8 @@ import (
 // StatusPhase identifies a resource-independent reconciliation phase.
 type StatusPhase string
 
+// Status phases. StatusQueued is published by a Manager; StatusDropped is
+// synthesized by EventStream; the others are published by Engine.
 const (
 	StatusQueued      StatusPhase = "queued"
 	StatusObserving   StatusPhase = "observing"

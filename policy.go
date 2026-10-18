@@ -8,17 +8,27 @@ import (
 )
 
 var (
+	// ErrInvalidPolicy is wrapped by Policy validation failures.
 	ErrInvalidPolicy = errors.New("reconciliation: invalid policy")
-	ErrPermanent     = errors.New("reconciliation: permanent error")
-	ErrTransient     = errors.New("reconciliation: transient error")
-	ErrConflict      = errors.New("reconciliation: conflict error")
+	// ErrPermanent marks errors wrapped with Permanent; they are never retried.
+	ErrPermanent = errors.New("reconciliation: permanent error")
+	// ErrTransient marks errors wrapped with Transient; they may be retried.
+	ErrTransient = errors.New("reconciliation: transient error")
+	// ErrConflict marks errors wrapped with Conflict; they may be retried.
+	ErrConflict = errors.New("reconciliation: conflict error")
 )
 
 // DefaultRollbackTimeout bounds best-effort cleanup when Policy does not set
 // RollbackTimeout or AttemptTimeout.
 const DefaultRollbackTimeout = 30 * time.Second
 
-// Policy bounds retry attempts, timeouts, and backoff.
+// Policy bounds retry attempts, timeouts, and backoff. MaxAttempts counts
+// the first attempt and must be positive. The delay after failed attempt n is
+// BaseDelay doubled n-1 times, capped at MaxDelay, then passed through Jitter
+// and clamped to [0, MaxDelay]. Zero AttemptTimeout means no per-attempt
+// deadline; RollbackTimeout falls back to AttemptTimeout and then to
+// DefaultRollbackTimeout. A Policy is a value and safe for concurrent use if
+// Jitter is.
 type Policy struct {
 	MaxAttempts     int
 	BaseDelay       time.Duration
@@ -35,6 +45,8 @@ type Decision struct {
 	Delay time.Duration
 }
 
+// Validate reports an error wrapping ErrInvalidPolicy if MaxAttempts is not
+// positive, a duration is negative, or MaxDelay is below BaseDelay.
 func (policy Policy) Validate() error {
 	if policy.MaxAttempts <= 0 {
 		return fmt.Errorf("%w: max attempts must be positive", ErrInvalidPolicy)
@@ -67,6 +79,11 @@ func (policy Policy) rollbackTimeout() time.Duration {
 	return DefaultRollbackTimeout
 }
 
+// Decide reports whether attempt (one-based) failing with err should be
+// retried and after what delay. Only errors matching ErrTransient or
+// ErrConflict are retried, and only while attempts remain; context
+// cancellation and deadline errors and ErrPermanent always stop. An invalid
+// policy never retries.
 func (policy Policy) Decide(attempt int, err error) Decision {
 	if err == nil || attempt < 1 || attempt >= policy.MaxAttempts || policy.Validate() != nil {
 		return Decision{}
@@ -123,14 +140,22 @@ func (err *classifiedError) Is(target error) bool {
 	return target == err.category
 }
 
+// Permanent marks err as not retryable. The result matches both err and
+// ErrPermanent with errors.Is and has err's message. Permanent(nil) is nil.
 func Permanent(err error) error {
 	return classify(ErrPermanent, err)
 }
 
+// Transient marks err as retryable, for example a temporary outage. The
+// result matches both err and ErrTransient with errors.Is and has err's
+// message. Transient(nil) is nil.
 func Transient(err error) error {
 	return classify(ErrTransient, err)
 }
 
+// Conflict marks err as retryable because the observed state changed
+// concurrently. The result matches both err and ErrConflict with errors.Is
+// and has err's message. Conflict(nil) is nil.
 func Conflict(err error) error {
 	return classify(ErrConflict, err)
 }

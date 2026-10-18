@@ -10,16 +10,22 @@ import (
 )
 
 var (
-	ErrInvalidKey        = errors.New("reconciliation: invalid key")
+	// ErrInvalidKey is wrapped by Key validation failures.
+	ErrInvalidKey = errors.New("reconciliation: invalid key")
+	// ErrInvalidGeneration is wrapped by Generation validation failures.
 	ErrInvalidGeneration = errors.New("reconciliation: invalid generation")
-	ErrInvalidDesired    = errors.New("reconciliation: invalid desired state")
-	ErrInvalidCondition  = errors.New("reconciliation: invalid condition")
-	ErrInvalidResult     = errors.New("reconciliation: invalid result")
+	// ErrInvalidDesired is wrapped by Desired validation failures.
+	ErrInvalidDesired = errors.New("reconciliation: invalid desired state")
+	// ErrInvalidCondition is wrapped by Condition validation failures.
+	ErrInvalidCondition = errors.New("reconciliation: invalid condition")
+	// ErrInvalidResult is wrapped by Result validation failures.
+	ErrInvalidResult = errors.New("reconciliation: invalid result")
 )
 
 // Key identifies one independently reconciled value.
 type Key string
 
+// Validate reports an error wrapping ErrInvalidKey if key is empty.
 func (key Key) Validate() error {
 	if key == "" {
 		return fmt.Errorf("%w: empty value", ErrInvalidKey)
@@ -30,6 +36,8 @@ func (key Key) Validate() error {
 // Generation identifies a positive revision of desired state.
 type Generation uint64
 
+// Validate reports an error wrapping ErrInvalidGeneration if generation is
+// zero.
 func (generation Generation) Validate() error {
 	if generation == 0 {
 		return fmt.Errorf("%w: zero value", ErrInvalidGeneration)
@@ -44,6 +52,9 @@ type Desired[S any] struct {
 	Spec       S
 }
 
+// Validate reports an error wrapping ErrInvalidDesired and the key or
+// generation sentinel if desired has an invalid identity. Spec is not
+// inspected.
 func (desired Desired[S]) Validate() error {
 	if err := desired.Key.Validate(); err != nil {
 		return fmt.Errorf("%w: %w", ErrInvalidDesired, err)
@@ -57,6 +68,7 @@ func (desired Desired[S]) Validate() error {
 // ConditionStatus is the tri-state value of a condition.
 type ConditionStatus string
 
+// Condition statuses.
 const (
 	ConditionTrue    ConditionStatus = "true"
 	ConditionFalse   ConditionStatus = "false"
@@ -72,6 +84,9 @@ type Condition struct {
 	LastTransitionTime time.Time
 }
 
+// Validate reports an error wrapping ErrInvalidCondition if the type is
+// empty, the status is unknown, or the type, reason or message is not valid
+// UTF-8 or contains NUL. Type and reason must also be single-line.
 func (condition Condition) Validate() error {
 	if condition.Type == "" {
 		return fmt.Errorf("%w: empty type", ErrInvalidCondition)
@@ -94,6 +109,9 @@ func (condition Condition) Validate() error {
 }
 
 // Result holds observed reconciliation output. Observed ownership is shallow.
+// Changed reports whether a change made by the reconciliation remains in
+// place. A positive RequeueAfter asks a Manager to run the same generation
+// again after that delay.
 type Result[O any] struct {
 	Key          Key
 	Generation   Generation
@@ -103,6 +121,8 @@ type Result[O any] struct {
 	RequeueAfter time.Duration
 }
 
+// Validate reports an error wrapping ErrInvalidResult if the identity is
+// invalid, RequeueAfter is negative or any condition is invalid.
 func (result Result[O]) Validate() error {
 	if err := result.Key.Validate(); err != nil {
 		return fmt.Errorf("%w: %w", ErrInvalidResult, err)
