@@ -7,94 +7,77 @@ import (
 	"testing"
 )
 
-func TestCICompatibilityPolicy(t *testing.T) {
+// NFR-RECON-05: CI is least-privilege and reproducible: only push and
+// pull_request triggers, read-only permissions, actions pinned to commit
+// SHAs, no secrets or private-module configuration, every job bounded by a
+// timeout, and the test matrix covering the Go floor and both supported
+// upstream releases.
+func TestCIWorkflowPolicy(t *testing.T) {
 	contents, err := os.ReadFile(".github/workflows/ci.yml")
 	if err != nil {
 		t.Fatalf("read CI workflow: %v", err)
 	}
 	workflow := string(contents)
 
+	triggers := yamlIndentedBlock(workflow, "on:")
+	requireWorkflowText(t, triggers, "push:", "pull_request:")
+	for _, forbidden := range []string{"pull_request_target", "workflow_run"} {
+		if strings.Contains(workflow, forbidden) {
+			t.Errorf("workflow must not use the %s trigger", forbidden)
+		}
+	}
+
 	permissions := yamlIndentedBlock(workflow, "permissions:")
 	if strings.TrimSpace(permissions) != "contents: read" {
 		t.Errorf("permissions must contain only contents: read, got:\n%s", permissions)
 	}
 
-	jobs := yamlIndentedBlock(workflow, "jobs:")
-	matrixJob := yamlBlockContainingAll(jobs, 2, []string{
-		"'1.22.x'", "'1.23.x'", "'1.24.x'", "'1.25.x'", "'1.26.x'",
-	})
-	if matrixJob == "" {
-		t.Fatal("no job contains the complete supported Go version matrix")
-	}
-
-	versionList := yamlIndentedBlock(matrixJob, "go-version:")
-	versionPattern := regexp.MustCompile(`(?m)^\s*-\s*'([^']+)'\s*$`)
-	matches := versionPattern.FindAllStringSubmatch(versionList, -1)
-	wantVersions := []string{"1.22.x", "1.23.x", "1.24.x", "1.25.x", "1.26.x"}
-	if len(matches) != len(wantVersions) {
-		t.Fatalf("Go matrix has %d versions, want %d", len(matches), len(wantVersions))
-	}
-	for i, want := range wantVersions {
-		if matches[i][1] != want {
-			t.Errorf("Go matrix version %d = %q, want %q", i, matches[i][1], want)
+	for _, forbidden := range []string{"GOPRIVATE", "GONOSUMDB", "GO_MODULES_TOKEN", "secrets.", ".netrc", "insteadOf"} {
+		if strings.Contains(workflow, forbidden) {
+			t.Errorf("workflow must not reference %q", forbidden)
 		}
 	}
 
-	requireWorkflowText(t, matrixJob,
-		"runs-on: ubuntu-latest",
-		"fail-fast: false",
-		"uses: actions/checkout@v6",
-		"uses: actions/setup-go@v6",
-		"cache: false",
-		"GOPRIVATE: github.com/justusschock/*",
-		"GONOSUMDB: github.com/justusschock/*",
+	usesLine := regexp.MustCompile(`(?m)^\s*(?:-\s+)?uses:\s*(\S+)(.*)$`)
+	pinned := regexp.MustCompile(`^[\w.-]+/[\w./-]+@[0-9a-f]{40}$`)
+	uses := usesLine.FindAllStringSubmatch(workflow, -1)
+	if len(uses) == 0 {
+		t.Fatal("workflow uses no actions")
+	}
+	for _, match := range uses {
+		if !pinned.MatchString(match[1]) || !strings.Contains(match[2], "# v") {
+			t.Errorf("action %q must be pinned to a full commit SHA with a version comment", match[1])
+		}
+	}
+	checkouts := strings.Count(workflow, "uses: actions/checkout@")
+	if got := strings.Count(workflow, "persist-credentials: false"); got != checkouts {
+		t.Errorf("%d checkouts but %d set persist-credentials: false", checkouts, got)
+	}
+
+	jobs := yamlIndentedBlock(workflow, "jobs:")
+	jobHeader := regexp.MustCompile(`(?m)^  [\w-]+:\s*$`)
+	jobTimeout := regexp.MustCompile(`(?m)^    timeout-minutes:\s*[1-9][0-9]*\s*$`)
+	jobCount := len(jobHeader.FindAllString(jobs, -1))
+	if jobCount == 0 {
+		t.Fatal("workflow defines no jobs")
+	}
+	if got := len(jobTimeout.FindAllString(jobs, -1)); got != jobCount {
+		t.Errorf("%d jobs but %d job-level timeout-minutes values", jobCount, got)
+	}
+
+	testJob := yamlBlockContainingAll(jobs, 2, []string{"go-version:", "go test"})
+	if testJob == "" {
+		t.Fatal("no test job with a Go version matrix")
+	}
+	requireWorkflowText(t, testJob,
+		"'1.25.x'", "'oldstable'", "'stable'",
 		"go mod verify",
-		"go mod tidy",
-		"git diff --exit-code -- go.mod go.sum",
 		"go vet ./...",
 		"go test -race -count=1 ./...",
 	)
-	if strings.Contains(matrixJob, "go mod tidy -diff") {
-		t.Error("Go 1.22 CI must not use the unsupported go mod tidy -diff flag")
+	if yamlBlockContainingAll(jobs, 2, []string{"golangci/golangci-lint-action@"}) == "" {
+		t.Error("no lint job runs golangci-lint")
 	}
-	if !regexp.MustCompile(`(?m)^\s+timeout-minutes:\s*[1-9][0-9]*\s*$`).MatchString(matrixJob) {
-		t.Error("matrix job must have a finite positive timeout-minutes value")
-	}
-
-	secretReference := "${{ secrets.GO_MODULES_TOKEN }}"
-	if strings.Count(workflow, secretReference) != 1 {
-		t.Errorf("workflow must reference the GO_MODULES_TOKEN secret exactly once, got %d", strings.Count(workflow, secretReference))
-	}
-	credentialStep := yamlStepContaining(matrixJob, "GO_MODULES_TOKEN: "+secretReference)
-	if credentialStep == "" {
-		t.Fatal("GO_MODULES_TOKEN must be supplied through a step environment")
-	}
-	requireWorkflowText(t, credentialStep,
-		"env:",
-		"GO_MODULES_TOKEN: "+secretReference,
-		`if [ -z "$GO_MODULES_TOKEN" ]; then`,
-		`echo "GO_MODULES_TOKEN is required" >&2`,
-		`credentials_file="$RUNNER_TEMP/git-credentials"`,
-		"umask 077",
-		`"$GO_MODULES_TOKEN" > "$credentials_file"`,
-		`chmod 0600 "$credentials_file"`,
-		`git config --global credential.helper "store --file=$credentials_file"`,
-	)
-	if regexp.MustCompile(`https?://[^\n]*(?:secrets\.GO_MODULES_TOKEN|\$\{\{\s*secrets\.GO_MODULES_TOKEN\s*\}\})`).MatchString(workflow) {
-		t.Error("GO_MODULES_TOKEN secret must not be interpolated into a URL")
-	}
-
-	cleanupStep := yamlStepContaining(matrixJob, "if: always()")
-	if cleanupStep == "" {
-		t.Fatal("credential cleanup must run with if: always()")
-	}
-	requireWorkflowText(t, cleanupStep,
-		"if: always()",
-		`rm -f "$RUNNER_TEMP/git-credentials"`,
-	)
-
-	triggers := yamlIndentedBlock(workflow, "on:")
-	requireWorkflowText(t, triggers, "push:", "pull_request:")
 }
 
 func requireWorkflowText(t *testing.T, contents string, requirements ...string) {
@@ -146,32 +129,6 @@ func yamlBlockContainingAll(contents string, indent int, requirements []string) 
 		if containsAll {
 			return block
 		}
-	}
-	return ""
-}
-
-func yamlStepContaining(contents, requirement string) string {
-	lines := strings.Split(contents, "\n")
-	for index, line := range lines {
-		if !strings.Contains(line, requirement) {
-			continue
-		}
-		start := index
-		for start >= 0 && !strings.HasPrefix(strings.TrimSpace(lines[start]), "- ") {
-			start--
-		}
-		if start < 0 {
-			return ""
-		}
-		indent := leadingSpaces(lines[start])
-		end := start + 1
-		for end < len(lines) {
-			if leadingSpaces(lines[end]) == indent && strings.HasPrefix(strings.TrimSpace(lines[end]), "- ") {
-				break
-			}
-			end++
-		}
-		return strings.Join(lines[start:end], "\n")
 	}
 	return ""
 }

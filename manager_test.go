@@ -635,8 +635,7 @@ func TestManagerLaterCloseReturnsSelectedCauseBeforeActiveCallExits(t *testing.T
 			}
 		default:
 			close(release)
-			<-closedAgain
-			t.Fatal("second Close() blocked until the active reconciliation exited")
+			t.Fatalf("second Close() blocked until the active reconciliation exited (eventual error: %v)", <-closedAgain)
 		}
 		close(release)
 	})
@@ -683,8 +682,7 @@ func TestManagerWaitingCloseObservesSelectedShutdownCause(t *testing.T) {
 			}
 		default:
 			close(release)
-			<-waitingClose
-			t.Fatal("waiting Close() did not observe the selected shutdown cause")
+			t.Fatalf("waiting Close() did not observe the selected shutdown cause (eventual error: %v)", <-waitingClose)
 		}
 		close(release)
 	})
