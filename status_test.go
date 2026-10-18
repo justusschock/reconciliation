@@ -30,6 +30,7 @@ func (sink *recordingStatusSink) Events() []StatusEvent {
 	return slices.Clone(sink.events)
 }
 
+// FR-RECON-15
 func TestEnginePublishesContextCarriedStatusPhases(t *testing.T) {
 	sink := &recordingStatusSink{}
 	observations := 0
@@ -66,6 +67,7 @@ func TestEnginePublishesContextCarriedStatusPhases(t *testing.T) {
 	}
 }
 
+// FR-RECON-15
 func TestEnginePublishesRetryingBeforeAnotherAttempt(t *testing.T) {
 	sink := &recordingStatusSink{}
 	wantErr := errors.New("observe transiently unavailable")
@@ -106,6 +108,7 @@ func TestEnginePublishesRetryingBeforeAnotherAttempt(t *testing.T) {
 	}
 }
 
+// FR-RECON-15
 func TestEnginePublishesRollbackAndFailure(t *testing.T) {
 	sink := &recordingStatusSink{}
 	wantErr := errors.New("apply failed")
@@ -147,6 +150,7 @@ func TestEnginePublishesRollbackAndFailure(t *testing.T) {
 	}
 }
 
+// FR-RECON-15
 func TestManagerPublishesQueuedBeforeEnginePhases(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		sink := &recordingStatusSink{}
@@ -182,6 +186,7 @@ func TestManagerPublishesQueuedBeforeEnginePhases(t *testing.T) {
 	})
 }
 
+// FR-RECON-15
 func TestManagerDoesNotStartBeforeInitialQueuedPublicationCompletes(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		sink := &gatedQueuedSink{entered: make(chan struct{}), release: make(chan struct{})}
@@ -230,6 +235,7 @@ func (sink *gatedQueuedSink) Publish(event StatusEvent) {
 	}
 }
 
+// FR-RECON-16
 func TestEventStreamPublishesWithoutBlockingAndMarksDroppedEvents(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		stream, err := NewEventStream(1)
@@ -267,6 +273,7 @@ func TestEventStreamPublishesWithoutBlockingAndMarksDroppedEvents(t *testing.T) 
 	})
 }
 
+// FR-RECON-16
 func TestEventStreamKeepsSubscribersIndependent(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		stream, err := NewEventStream(2)
@@ -289,6 +296,7 @@ func TestEventStreamKeepsSubscribersIndependent(t *testing.T) {
 	})
 }
 
+// FR-RECON-16
 func TestEventStreamConcurrentPublishAndCloseIsSafe(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		stream, err := NewEventStream(4)
@@ -315,6 +323,7 @@ func TestEventStreamConcurrentPublishAndCloseIsSafe(t *testing.T) {
 	})
 }
 
+// FR-RECON-16
 func TestEventStreamRejectsUnboundedCapacity(t *testing.T) {
 	if _, err := NewEventStream(0); !errors.Is(err, concurrency.ErrInvalidLimit) {
 		t.Fatalf("NewEventStream() error = %v, want ErrInvalidLimit", err)

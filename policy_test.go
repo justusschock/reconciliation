@@ -7,6 +7,7 @@ import (
 	"time"
 )
 
+// FR-RECON-07
 func TestPolicyValidation(t *testing.T) {
 	valid := Policy{MaxAttempts: 3, BaseDelay: time.Second, MaxDelay: 2 * time.Second, AttemptTimeout: time.Minute}
 	if err := valid.Validate(); err != nil {
@@ -37,6 +38,7 @@ func TestPolicyValidation(t *testing.T) {
 	}
 }
 
+// FR-RECON-06
 func TestClassificationWrappersPreserveIdentity(t *testing.T) {
 	cause := errors.New("cause")
 	tests := []struct {
@@ -64,6 +66,7 @@ func TestClassificationWrappersPreserveIdentity(t *testing.T) {
 	}
 }
 
+// FR-RECON-06
 func TestPolicyRetriesOnlyTransientAndConflictErrors(t *testing.T) {
 	policy := Policy{MaxAttempts: 3, BaseDelay: time.Second, MaxDelay: 4 * time.Second}
 	tests := []struct {
@@ -100,6 +103,7 @@ func TestPolicyRetriesOnlyTransientAndConflictErrors(t *testing.T) {
 	}
 }
 
+// FR-RECON-07
 func TestPolicyRequiresOneBasedAttemptAndValidPolicy(t *testing.T) {
 	retryable := Transient(errors.New("temporary"))
 	policy := Policy{MaxAttempts: 3, MaxDelay: time.Second}
@@ -113,6 +117,7 @@ func TestPolicyRequiresOneBasedAttemptAndValidPolicy(t *testing.T) {
 	}
 }
 
+// FR-RECON-07
 func TestPolicyExponentialDelayCapsAndSaturates(t *testing.T) {
 	retryable := Transient(errors.New("temporary"))
 	policy := Policy{MaxAttempts: 10, BaseDelay: 10 * time.Millisecond, MaxDelay: 100 * time.Millisecond}
@@ -132,6 +137,7 @@ func TestPolicyExponentialDelayCapsAndSaturates(t *testing.T) {
 	}
 }
 
+// FR-RECON-07
 func TestPolicyAppliesJitterAfterCapAndClampsResult(t *testing.T) {
 	retryable := Conflict(errors.New("changed"))
 	t.Run("after cap", func(t *testing.T) {
@@ -168,6 +174,7 @@ func TestPolicyAppliesJitterAfterCapAndClampsResult(t *testing.T) {
 	}
 }
 
+// FR-RECON-07
 func TestPolicyDoesNotApplyJitterWithoutRetry(t *testing.T) {
 	called := false
 	policy := Policy{MaxAttempts: 2, MaxDelay: time.Second, Jitter: func(delay time.Duration) time.Duration { called = true; return delay }}

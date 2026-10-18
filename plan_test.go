@@ -36,6 +36,7 @@ func (*separatelyTypedAdapter) Undo(context.Context, Undo[adapterUndo]) error {
 
 var _ Adapter[adapterSpec, adapterObserved, adapterAction, adapterUndo] = (*separatelyTypedAdapter)(nil)
 
+// FR-RECON-03, NFR-RECON-01
 func TestValidatePlanRejectsInvalidReferences(t *testing.T) {
 	tests := []struct {
 		name string
@@ -74,6 +75,7 @@ func TestValidatePlanRejectsInvalidReferences(t *testing.T) {
 	}
 }
 
+// FR-RECON-03, NFR-RECON-01
 func TestValidatePlanReportsCanonicalCyclePath(t *testing.T) {
 	plan := Plan[string]{Actions: []Action[string]{
 		{ID: "z", DependsOn: []ActionID{"y"}},
@@ -91,6 +93,7 @@ func TestValidatePlanReportsCanonicalCyclePath(t *testing.T) {
 	}
 }
 
+// FR-RECON-03, NFR-RECON-01
 func TestValidatePlanReportsSelfCycle(t *testing.T) {
 	err := ValidatePlan(Plan[string]{Actions: []Action[string]{{ID: "a", DependsOn: []ActionID{"a"}}}})
 	if !errors.Is(err, ErrPlanCycle) || !strings.Contains(err.Error(), "a -> a") {
@@ -98,6 +101,7 @@ func TestValidatePlanReportsSelfCycle(t *testing.T) {
 	}
 }
 
+// FR-RECON-03, NFR-RECON-01
 func TestValidatePlanEscapesUnsafeCycleIDs(t *testing.T) {
 	unsafe := ActionID("line\nbreak -> next")
 	invalidUTF8 := ActionID(string([]byte{'b', 'a', 'd', 0xff}))
@@ -118,6 +122,7 @@ func TestValidatePlanEscapesUnsafeCycleIDs(t *testing.T) {
 	}
 }
 
+// FR-RECON-04, NFR-RECON-01
 func TestOrderedUsesStableTopologicalOrder(t *testing.T) {
 	plan := Plan[string]{Actions: []Action[string]{
 		{ID: "publish", DependsOn: []ActionID{"compile", "lint"}},
@@ -141,6 +146,7 @@ func TestOrderedUsesStableTopologicalOrder(t *testing.T) {
 	}
 }
 
+// FR-RECON-04, NFR-RECON-01
 func TestOrderedDoesNotAliasOrMutateInput(t *testing.T) {
 	dependencies := []ActionID{"b", "a"}
 	plan := Plan[int]{Actions: []Action[int]{
@@ -171,6 +177,7 @@ func TestOrderedDoesNotAliasOrMutateInput(t *testing.T) {
 	}
 }
 
+// FR-RECON-03, NFR-RECON-01
 func TestOrderedReturnsValidationErrorWithoutPartialOrder(t *testing.T) {
 	got, err := Ordered(Plan[string]{Actions: []Action[string]{
 		{ID: "valid"},

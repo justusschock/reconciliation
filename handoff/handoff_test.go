@@ -70,6 +70,7 @@ func (codec codecFuncs[S]) Unmarshal(data []byte) (S, error) {
 var _ lifecyclehandoff.Exporter[[]Pending[testSpec]] = (*Exporter[testSpec])(nil)
 var _ lifecyclehandoff.Adopter[[]Pending[testSpec]] = (*Adopter[testSpec])(nil)
 
+// FR-RECON-17, NFR-RECON-01
 func TestHandoffRoundTripIsCanonicalAndStateOnly(t *testing.T) {
 	deadline := time.Date(2026, time.July, 17, 10, 30, 0, 123456789, time.FixedZone("source", 2*60*60))
 	alpha := Pending[testSpec]{
@@ -161,6 +162,7 @@ func TestHandoffRoundTripIsCanonicalAndStateOnly(t *testing.T) {
 	}
 }
 
+// FR-RECON-19
 func TestExportOwnsEachCodecBufferBeforeMarshalingTheNextSpec(t *testing.T) {
 	scratch := make([]byte, len("first"))
 	exporter, err := NewExporter[[]byte](codecFuncs[[]byte]{
@@ -194,6 +196,7 @@ func TestExportOwnsEachCodecBufferBeforeMarshalingTheNextSpec(t *testing.T) {
 	}
 }
 
+// FR-RECON-19
 func TestAdoptedCodecBytesDoNotAliasArtifactData(t *testing.T) {
 	adopter, err := NewAdopter[[]byte](codecFuncs[[]byte]{
 		marshal: func(value []byte) ([]byte, error) {
@@ -221,6 +224,7 @@ func TestAdoptedCodecBytesDoNotAliasArtifactData(t *testing.T) {
 	}
 }
 
+// FR-RECON-18
 func TestConstructorsRejectNilCodecs(t *testing.T) {
 	var nilCodec Codec[testSpec]
 	var typedNil *pointerCodec
@@ -238,6 +242,7 @@ func TestConstructorsRejectNilCodecs(t *testing.T) {
 	}
 }
 
+// FR-RECON-17, NFR-RECON-01
 func TestAdoptRejectsUnknownVersion(t *testing.T) {
 	artifact, err := lifecyclehandoff.NewArtifact(testMediaType, 99, []byte(`{"pending":[]}`), nil)
 	if err != nil {
@@ -252,6 +257,7 @@ func TestAdoptRejectsUnknownVersion(t *testing.T) {
 	}
 }
 
+// FR-RECON-17, NFR-RECON-01
 func TestAdoptRejectsWrongMediaTypeAndDigestMismatch(t *testing.T) {
 	adopter, err := NewAdopter[testSpec](jsonCodec[testSpec]{})
 	if err != nil {
@@ -280,6 +286,7 @@ func TestAdoptRejectsWrongMediaTypeAndDigestMismatch(t *testing.T) {
 	})
 }
 
+// FR-RECON-18
 func TestExportRejectsInvalidPendingState(t *testing.T) {
 	exporter, err := NewExporter[testSpec](jsonCodec[testSpec]{})
 	if err != nil {
@@ -316,6 +323,7 @@ func TestExportRejectsInvalidPendingState(t *testing.T) {
 	})
 }
 
+// FR-RECON-18
 func TestAdoptRejectsInvalidPendingStateAndTrailingData(t *testing.T) {
 	adopter, err := NewAdopter[testSpec](jsonCodec[testSpec]{})
 	if err != nil {
@@ -364,6 +372,7 @@ func TestAdoptRejectsInvalidPendingStateAndTrailingData(t *testing.T) {
 	})
 }
 
+// FR-RECON-18
 func TestCodecErrorsArePreserved(t *testing.T) {
 	marshalErr := errors.New("marshal failed")
 	exporter, err := NewExporter[testSpec](codecFuncs[testSpec]{
@@ -400,6 +409,7 @@ func TestCodecErrorsArePreserved(t *testing.T) {
 	}
 }
 
+// FR-RECON-18
 func TestHandoffHonorsCanceledContexts(t *testing.T) {
 	wantErr := errors.New("handoff canceled")
 	ctx, cancel := context.WithCancelCause(context.Background())

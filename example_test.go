@@ -66,6 +66,7 @@ func (s *settings) Undo(_ context.Context, undo reconciliation.Undo[previous]) e
 	return nil
 }
 
+// FR-RECON-05
 func ExampleEngine_Reconcile() {
 	env := &settings{current: map[string]string{"replicas": "1"}}
 	engine := reconciliation.NewEngine(env, reconciliation.Policy{
@@ -90,6 +91,7 @@ func ExampleEngine_Reconcile() {
 	// true api:v2 3
 }
 
+// FR-RECON-04, NFR-RECON-01
 func ExampleOrdered() {
 	plan := reconciliation.Plan[string]{Actions: []reconciliation.Action[string]{
 		{ID: "fetch", Value: "read current state"},
@@ -113,6 +115,7 @@ func ExampleOrdered() {
 	// publish
 }
 
+// FR-RECON-12
 func ExampleManager_Pending() {
 	reconciler := &blockingReconciler{
 		started: make(chan struct{}),

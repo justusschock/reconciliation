@@ -40,6 +40,7 @@ func managerResult(desired Desired[managerSpec], observed string) Result[string]
 	return Result[string]{Key: desired.Key, Generation: desired.Generation, Observed: observed}
 }
 
+// FR-RECON-10
 func TestNewManagerValidatesRequiredConfiguration(t *testing.T) {
 	reconciler := reconcilerFunc[managerSpec, string](func(_ context.Context, desired Desired[managerSpec]) (Result[string], error) {
 		return managerResult(desired, "ok"), nil
@@ -63,6 +64,7 @@ func (*stubReconciler) Reconcile(_ context.Context, desired Desired[managerSpec]
 	return managerResult(desired, "ok"), nil
 }
 
+// FR-RECON-10
 func TestManagerSerializesKeysAndBoundsActiveWork(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		type callID struct {
@@ -150,6 +152,7 @@ func TestManagerSerializesKeysAndBoundsActiveWork(t *testing.T) {
 	})
 }
 
+// FR-RECON-11
 func TestManagerCoalescesEqualAndSupersedesPendingGenerations(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		blockerRelease := make(chan struct{})
@@ -214,6 +217,7 @@ func TestManagerCoalescesEqualAndSupersedesPendingGenerations(t *testing.T) {
 	})
 }
 
+// FR-RECON-11
 func TestManagerDoesNotCancelActiveWorkOnSupersession(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		firstStarted := make(chan struct{})
@@ -258,6 +262,7 @@ func TestManagerDoesNotCancelActiveWorkOnSupersession(t *testing.T) {
 	})
 }
 
+// FR-RECON-12
 func TestManagerOwnsAcceptedAndPendingSpecs(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		blockerStarted := make(chan struct{})
@@ -318,6 +323,7 @@ func TestManagerOwnsAcceptedAndPendingSpecs(t *testing.T) {
 	})
 }
 
+// FR-RECON-12
 func TestManagerCoalescedResultsOwnConditionsButObservedIsShallow(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		started := make(chan struct{})
@@ -362,6 +368,7 @@ func TestManagerCoalescedResultsOwnConditionsButObservedIsShallow(t *testing.T) 
 	})
 }
 
+// FR-RECON-13
 func TestManagerRequeuesAtAbsoluteDeadlineAndResolvesOriginalFuture(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		start := time.Now()
@@ -414,6 +421,7 @@ func TestManagerRequeuesAtAbsoluteDeadlineAndResolvesOriginalFuture(t *testing.T
 	})
 }
 
+// FR-RECON-13
 func TestManagerNewGenerationReplacesScheduledRequeue(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		calls := make(chan Generation, 3)
@@ -455,6 +463,7 @@ func TestManagerNewGenerationReplacesScheduledRequeue(t *testing.T) {
 	})
 }
 
+// FR-RECON-14
 func TestManagerCloseStopsAdmissionFailsPendingAndLetsActiveFinish(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		started := make(chan struct{})
@@ -509,6 +518,7 @@ func TestManagerCloseStopsAdmissionFailsPendingAndLetsActiveFinish(t *testing.T)
 	})
 }
 
+// FR-RECON-14
 func TestManagerCloseDeadlineCancelsActiveWorkAndResolvesEveryFuture(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		started := make(chan struct{})
@@ -542,6 +552,7 @@ func TestManagerCloseDeadlineCancelsActiveWorkAndResolvesEveryFuture(t *testing.
 	})
 }
 
+// FR-RECON-14
 func TestManagerConcurrentCloseDeadlinesUseOneShutdownCause(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		started := make(chan struct{})
@@ -600,6 +611,7 @@ func TestManagerConcurrentCloseDeadlinesUseOneShutdownCause(t *testing.T) {
 	})
 }
 
+// FR-RECON-14
 func TestManagerLaterCloseReturnsSelectedCauseBeforeActiveCallExits(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		started := make(chan struct{})
@@ -641,6 +653,7 @@ func TestManagerLaterCloseReturnsSelectedCauseBeforeActiveCallExits(t *testing.T
 	})
 }
 
+// FR-RECON-14
 func TestManagerWaitingCloseObservesSelectedShutdownCause(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		started := make(chan struct{})
@@ -688,6 +701,7 @@ func TestManagerWaitingCloseObservesSelectedShutdownCause(t *testing.T) {
 	})
 }
 
+// FR-RECON-14
 func TestManagerSubmitContextOnlyControlsAdmission(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		started := make(chan struct{})

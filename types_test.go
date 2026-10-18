@@ -8,6 +8,7 @@ import (
 	"unicode/utf8"
 )
 
+// FR-RECON-01
 func TestKeyValidation(t *testing.T) {
 	if err := Key("resource").Validate(); err != nil {
 		t.Fatalf("Key.Validate() = %v, want nil", err)
@@ -17,6 +18,7 @@ func TestKeyValidation(t *testing.T) {
 	}
 }
 
+// FR-RECON-01
 func TestGenerationValidation(t *testing.T) {
 	if err := Generation(1).Validate(); err != nil {
 		t.Fatalf("Generation.Validate() = %v, want nil", err)
@@ -26,6 +28,7 @@ func TestGenerationValidation(t *testing.T) {
 	}
 }
 
+// FR-RECON-01
 func TestDesiredRequiresKeyAndGeneration(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -49,12 +52,14 @@ func TestDesiredRequiresKeyAndGeneration(t *testing.T) {
 	}
 }
 
+// FR-RECON-02
 func TestConditionStatusValues(t *testing.T) {
 	if ConditionTrue != "true" || ConditionFalse != "false" || ConditionUnknown != "unknown" {
 		t.Fatalf("condition statuses = (%q, %q, %q)", ConditionTrue, ConditionFalse, ConditionUnknown)
 	}
 }
 
+// FR-RECON-02
 func TestConditionValidation(t *testing.T) {
 	valid := Condition{
 		Type:               "Ready",
@@ -97,6 +102,7 @@ func TestConditionValidation(t *testing.T) {
 	}
 }
 
+// FR-RECON-02
 func TestResultValidation(t *testing.T) {
 	valid := Result[string]{
 		Key:          "resource",
@@ -135,6 +141,7 @@ func TestResultValidation(t *testing.T) {
 	}
 }
 
+// FR-RECON-02
 func TestResultCloneCopiesConditionsAndKeepsObservedShallow(t *testing.T) {
 	observed := map[string]int{"value": 1}
 	original := Result[map[string]int]{
@@ -161,6 +168,7 @@ func TestResultCloneCopiesConditionsAndKeepsObservedShallow(t *testing.T) {
 	}
 }
 
+// FR-RECON-02
 func TestConditionValidationAcceptsUnicodeAndMessageNewlines(t *testing.T) {
 	condition := Condition{Type: "Bereit", Status: ConditionUnknown, Reason: "Überprüfung", Message: strings.Repeat("状態\n", 2)}
 	if err := condition.Validate(); err != nil {

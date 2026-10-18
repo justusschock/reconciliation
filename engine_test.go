@@ -39,6 +39,7 @@ func (adapter *engineAdapter) Undo(ctx context.Context, undo Undo[engineUndo]) e
 	return adapter.undo(ctx, undo)
 }
 
+// FR-RECON-05
 func TestEngineNoOpObservesBeforeAndAfter(t *testing.T) {
 	observations := 0
 	plans := 0
@@ -67,6 +68,7 @@ func TestEngineNoOpObservesBeforeAndAfter(t *testing.T) {
 	}
 }
 
+// FR-RECON-05
 func TestEngineAppliesStablePlanAndOwnsUndoProvenance(t *testing.T) {
 	var applied []ActionID
 	observations := 0
@@ -101,6 +103,7 @@ func TestEngineAppliesStablePlanAndOwnsUndoProvenance(t *testing.T) {
 	}
 }
 
+// FR-RECON-05
 func TestEngineRejectsInvalidConfigurationBeforeAdapterCalls(t *testing.T) {
 	calls := 0
 	adapter := &engineAdapter{
@@ -135,6 +138,7 @@ func TestEngineRejectsInvalidConfigurationBeforeAdapterCalls(t *testing.T) {
 	}
 }
 
+// FR-RECON-05
 func TestEngineValidatesWholePlanBeforeMutation(t *testing.T) {
 	applyCalls := 0
 	adapter := &engineAdapter{
@@ -161,6 +165,7 @@ func TestEngineValidatesWholePlanBeforeMutation(t *testing.T) {
 	}
 }
 
+// FR-RECON-08
 func TestEngineRollsBackCompletedActionsInReverseOrder(t *testing.T) {
 	wantApplyErr := errors.New("apply c failed")
 	var applied []ActionID
@@ -186,6 +191,7 @@ func TestEngineRollsBackCompletedActionsInReverseOrder(t *testing.T) {
 	}
 }
 
+// FR-RECON-08
 func TestEngineLeavesIrreversibleActionsOutOfRollback(t *testing.T) {
 	wantApplyErr := errors.New("apply c failed")
 	var applied []ActionID
@@ -204,6 +210,7 @@ func TestEngineLeavesIrreversibleActionsOutOfRollback(t *testing.T) {
 	}
 }
 
+// FR-RECON-08
 func TestEngineRetainsDependenciesOfResidualActions(t *testing.T) {
 	wantApplyErr := errors.New("apply z failed")
 	var undone []ActionID
@@ -241,6 +248,7 @@ func TestEngineRetainsDependenciesOfResidualActions(t *testing.T) {
 	}
 }
 
+// FR-RECON-08
 func TestEngineJoinsRollbackErrorsAndDoesNotRetry(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		wantApplyErr := Transient(errors.New("apply failed"))
@@ -264,6 +272,7 @@ func TestEngineJoinsRollbackErrorsAndDoesNotRetry(t *testing.T) {
 	})
 }
 
+// FR-RECON-08
 func TestEngineRetriesAfterSuccessfulRollback(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		wantTransient := Transient(errors.New("temporary apply failure"))
@@ -317,6 +326,7 @@ func TestEngineRetriesAfterSuccessfulRollback(t *testing.T) {
 	})
 }
 
+// FR-RECON-08
 func TestEngineCarriesResidualChangeAcrossRetries(t *testing.T) {
 	wantTransient := Transient(errors.New("temporary apply failure"))
 	plans := 0
@@ -349,6 +359,7 @@ func TestEngineCarriesResidualChangeAcrossRetries(t *testing.T) {
 	}
 }
 
+// FR-RECON-06
 func TestEngineRetriesClassifiedFailureWithFreshState(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		wantConflict := Conflict(errors.New("stale observation"))
@@ -385,6 +396,7 @@ func TestEngineRetriesClassifiedFailureWithFreshState(t *testing.T) {
 	})
 }
 
+// FR-RECON-06
 func TestEngineDoesNotRetryPermanentOrUnclassifiedErrors(t *testing.T) {
 	for _, test := range []struct {
 		name string
@@ -412,6 +424,7 @@ func TestEngineDoesNotRetryPermanentOrUnclassifiedErrors(t *testing.T) {
 	}
 }
 
+// FR-RECON-09
 func TestEngineAttemptTimeoutRollsBackWithParentContext(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		var undone []Undo[engineUndo]
@@ -455,6 +468,7 @@ func TestEngineAttemptTimeoutRollsBackWithParentContext(t *testing.T) {
 	})
 }
 
+// FR-RECON-09
 func TestEngineParentCancellationDoesNotSuppressRollback(t *testing.T) {
 	ctx, cancel := context.WithCancelCause(context.Background())
 	wantCancel := errors.New("caller stopped")
@@ -492,6 +506,7 @@ func TestEngineParentCancellationDoesNotSuppressRollback(t *testing.T) {
 	}
 }
 
+// FR-RECON-09
 func TestEngineBoundsRollbackAndPreservesCleanupDeadline(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		wantApplyErr := errors.New("apply failed")
@@ -531,6 +546,7 @@ func TestEngineBoundsRollbackAndPreservesCleanupDeadline(t *testing.T) {
 	})
 }
 
+// FR-RECON-09
 func TestEngineCancellationInterruptsRetryWait(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		wantFailure := Transient(errors.New("retry me"))
@@ -575,6 +591,7 @@ func TestEngineCancellationInterruptsRetryWait(t *testing.T) {
 	})
 }
 
+// FR-RECON-08
 func TestEngineRollsBackWhenFinalObservationFails(t *testing.T) {
 	wantObserveErr := errors.New("final observation failed")
 	observations := 0
@@ -694,6 +711,7 @@ func (clock *recordingClock) Delays() []time.Duration {
 
 var _ Clock = (*recordingClock)(nil)
 
+// FR-RECON-05
 func TestEngineResultShapeIsStable(t *testing.T) {
 	want := Result[engineObserved]{Key: "resource", Generation: 1, Observed: 2, Changed: true}
 	adapter := &engineAdapter{

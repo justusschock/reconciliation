@@ -10,6 +10,7 @@ import (
 	reconciliationhandoff "github.com/justusschock/go-reconciliation/handoff"
 )
 
+// FR-RECON-17, NFR-RECON-01
 func ExampleExporter() {
 	retryAt := time.Date(2026, time.July, 17, 12, 0, 0, 0, time.FixedZone("offset", 2*60*60))
 	managerSnapshot := []reconciliation.Pending[[]byte]{{
