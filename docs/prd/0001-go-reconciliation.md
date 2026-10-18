@@ -83,7 +83,7 @@ or transport.
 | FR-RECON-02 | `Condition` has a tri-state status and rejects empty or malformed type, reason and message text; `Result` validates its identity, a non-negative `RequeueAfter` and every condition; `Result.Clone` gives independent `Conditions` storage while `Observed` stays shallow. | MUST |
 | FR-RECON-03 | `ValidatePlan` and `Ordered` reject empty IDs, duplicate actions, missing or duplicate dependencies and cycles. Errors wrap `ErrInvalidPlan` plus a category sentinel; cycles are reported as a canonical path starting at the smallest ID, with unsafe IDs quoted. | MUST |
 | FR-RECON-04 | `Ordered` returns a deterministic topological order that picks the lexicographically smallest ready action, without aliasing or mutating the input plan. | MUST |
-| FR-RECON-05 | `Engine.Reconcile` validates its input, policy and adapter before any adapter call, then observes, plans, validates the whole plan before mutating, applies actions in order, and observes again to verify. `Result.Changed` reports whether any change remains. | MUST |
+| FR-RECON-05 | `Engine.Reconcile` validates its input, policy, adapter and clock before any adapter call, then observes, plans, validates the whole plan before mutating, applies actions in order, and observes again to verify. `Result.Changed` reports whether any change remains. | MUST |
 | FR-RECON-06 | Errors wrapped with `Transient` or `Conflict` are retried while attempts remain; `Permanent`, unclassified and context errors are not. Every retry starts with a fresh observation and plan. | MUST |
 | FR-RECON-07 | Retry delays grow exponentially from `BaseDelay`, saturate at `MaxDelay` without overflow, and pass through an optional `Jitter` whose result is clamped to `[0, MaxDelay]`. Invalid policies are rejected with `ErrInvalidPolicy`. | MUST |
 | FR-RECON-08 | When an attempt fails after mutating, completed reversible actions are undone in reverse order; irreversible actions and the transitive dependencies of any action that survives are retained; a failed rollback is joined to the primary error and stops further retries. | MUST |
@@ -98,6 +98,7 @@ or transport.
 | FR-RECON-17 | `handoff.Exporter` and `handoff.Adopter` round-trip pending desired values and absolute retry deadlines through a `go-lifecycle` artifact with a fixed media type and schema version 1, canonical key order and UTC deadlines, carrying no other state. | MUST |
 | FR-RECON-18 | Adoption rejects wrong media types, unsupported versions, digest mismatches, invalid or duplicate entries, invalid deadlines, unknown fields and trailing data; export rejects invalid or duplicate entries and unencodable deadlines; nil codecs are rejected; codec errors and context causes are preserved. | MUST |
 | FR-RECON-19 | Export copies each codec output before the next `Marshal` call; adopted specifications do not alias artifact bytes when the codec honours its ownership contract. | MUST |
+| FR-RECON-20 | Engine retry delays and manager requeues use the standard library clock by default; a `Clock` supplied with `WithClock` or a `ManagerClock` supplied with `WithManagerClock` replaces it (the manager clock's `Now` also determines `Pending.RetryAt`). A nil or typed-nil clock, or an `After` that returns a nil channel, is reported with `ErrNilClock`. | MUST |
 
 ## 5. Non-functional requirements
 
@@ -109,7 +110,7 @@ or transport.
 | NFR-RECON-04 | Toolchain: the module's floor is Go 1.25 with no `toolchain` or `replace` directive. | `TestModuleCompatibilityPolicy` |
 | NFR-RECON-05 | Supply chain: CI uses only `push`/`pull_request` triggers, read-only permissions, SHA-pinned actions and no secrets. | `TestCIWorkflowPolicy` |
 | NFR-RECON-06 | Dependencies: standard library plus `go-concurrency` and `go-lifecycle` only; no logging or global state. | `go.mod` review (ADR-0003) |
-| NFR-RECON-07 | Test determinism: time- and concurrency-dependent tests use `testing/synctest` virtual time; no real sleeps. | ADR-0012 |
+| NFR-RECON-07 | Test determinism: time- and concurrency-dependent tests use `testing/synctest` virtual time; no real sleeps. Clock option tests supply fake clocks inside a bubble. | ADR-0012 |
 
 ## 6. API sketch
 
@@ -126,7 +127,8 @@ type Adapter[S, O, A, U any] interface {
 func ValidatePlan[A any](Plan[A]) error
 func Ordered[A any](Plan[A]) ([]Action[A], error)
 
-func NewEngine[S, O, A, U any](Adapter[S, O, A, U], Policy) *Engine[S, O, A, U]
+func NewEngine[S, O, A, U any](Adapter[S, O, A, U], Policy, ...EngineOption) *Engine[S, O, A, U]
+func WithClock(Clock) EngineOption // Clock: After(time.Duration) <-chan time.Time
 func (*Engine[S, O, A, U]) Reconcile(context.Context, Desired[S]) (Result[O], error)
 
 func Permanent(error) error
@@ -137,6 +139,8 @@ type Reconciler[S, O any] interface {
 	Reconcile(context.Context, Desired[S]) (Result[O], error)
 }
 func NewManager[S, O any](Reconciler[S, O], int, CloneSpec[S], ...ManagerOption) (*Manager[S, O], error)
+func WithManagerClock(ManagerClock) ManagerOption // ManagerClock: Now() time.Time; After(time.Duration) <-chan time.Time
+func WithManagerStatusSink(StatusSink) ManagerOption
 func (*Manager[S, O]) Submit(context.Context, Desired[S]) *concurrency.Future[Result[O]]
 func (*Manager[S, O]) Pending() []Pending[S]
 func (*Manager[S, O]) Close(context.Context) error
@@ -175,6 +179,7 @@ func (*Adopter[S]) Adopt(context.Context, lifecyclehandoff.Artifact) ([]Pending[
 | Handoff round-trips canonical, state-only artifacts | FR-RECON-17, NFR-RECON-01 | `TestHandoffRoundTripIsCanonicalAndStateOnly`, `TestAdoptRejectsUnknownVersion`, `TestAdoptRejectsWrongMediaTypeAndDigestMismatch`, `ExampleExporter` |
 | Handoff rejects invalid input and preserves causes | FR-RECON-18 | `TestExportRejectsInvalidPendingState`, `TestAdoptRejectsInvalidPendingStateAndTrailingData`, `TestConstructorsRejectNilCodecs`, `TestCodecErrorsArePreserved`, `TestHandoffHonorsCanceledContexts` |
 | Codec buffers are owned correctly | FR-RECON-19 | `TestExportOwnsEachCodecBufferBeforeMarshalingTheNextSpec`, `TestAdoptedCodecBytesDoNotAliasArtifactData` |
+| Supplied clocks are honoured; nil clocks are rejected | FR-RECON-20 | `TestEngineHonoursSuppliedClock`, `TestEngineReportsNilClockChannel`, `TestEngineRejectsInvalidConfigurationBeforeAdapterCalls`, `TestManagerHonoursSuppliedClock`, `TestManagerReportsNilClockChannel`, `TestNewManagerValidatesRequiredConfiguration` |
 | Go floor and module hygiene | NFR-RECON-04 | `TestModuleCompatibilityPolicy` |
 | CI supply-chain policy | NFR-RECON-05 | `TestCIWorkflowPolicy` |
 

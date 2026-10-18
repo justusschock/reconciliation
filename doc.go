@@ -14,7 +14,9 @@
 // bound on concurrently active keys, coalescing of equal generations,
 // supersession of stale pending generations, delayed requeues and graceful
 // shutdown. [EventStream] and [WithStatusSink] report progress without ever
-// blocking reconciliation.
+// blocking reconciliation. Retry delays and delayed requeues use the standard
+// library clock unless a [Clock] or [ManagerClock] is supplied with
+// [WithClock] or [WithManagerClock].
 //
 // The handoff subpackage transfers pending work to a successor process.
 //

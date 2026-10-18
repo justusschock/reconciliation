@@ -56,10 +56,12 @@ No behaviour is added or changed before the documents that govern it say so.
 - `.` (package `reconciliation`): identity and result types, action plans
   (`Plan`, `ValidatePlan`, `Ordered`), retry `Policy` and error
   classification, the `Adapter` contract and `Engine`, the keyed `Manager`,
-  and status reporting (`StatusSink`, `EventStream`).
+  the optional `Clock`/`ManagerClock` time sources, and status reporting
+  (`StatusSink`, `EventStream`).
 - `handoff/`: export and adoption of pending desired state through
   `go-lifecycle` artifacts (the library's only wire format, ADR-0009).
-- `internal/`: none at present; implementation-only packages go here.
+- `internal/conformance/`: a function-field `Adapter` test helper; not part
+  of the API. Implementation-only packages go under `internal/`.
 - `docs/`: PRD, ADRs and their index.
 - `*_policy_test.go`: repository invariants (Go floor, CI hardening).
 
@@ -86,7 +88,8 @@ No behaviour is added or changed before the documents that govern it say so.
   public entry point, kept in sync with the README.
 - **`testing/synctest`** for anything involving time or concurrency
   (timeouts, TTLs, retries, tickers, leases, goroutine coordination). No real
-  `time.Sleep` waits in tests.
+  `time.Sleep` waits in tests. Fake `Clock`/`ManagerClock` implementations
+  are used only to test the clock options themselves (`clock_test.go`).
 - There is no public conformance suite; `Adapter` implementations are
   domain-specific and their contract is documented on the interface
   (ADR-0010).

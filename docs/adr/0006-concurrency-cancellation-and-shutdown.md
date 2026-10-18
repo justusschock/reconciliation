@@ -54,8 +54,10 @@ cancellation, bounded by `RollbackTimeout`, else `AttemptTimeout`, else
 stops admission and fails pending work with `concurrency.ErrClosed`, waits
 for active work until its context ends, then cancels the manager context
 with the first selected cause; every concurrent and later `Close` returns
-that cause, and every future is resolved. Delayed requeues use standard
-library timers that are stopped when superseded or closed.
+that cause, and every future is resolved. Delayed requeues wait on the
+manager's `ManagerClock` (the standard library clock unless
+`WithManagerClock` supplies another); the waiting goroutine exits when the
+requeue is superseded or the manager closes.
 
 ## Consequences
 

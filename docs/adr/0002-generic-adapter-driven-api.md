@@ -16,8 +16,9 @@ types. The code expresses this with one generic `Adapter[S, O, A, U]`
 interface (desired specification, observation, action and undo payloads), an
 `Engine` that runs one reconciliation through it, a `Reconciler[S, O]`
 interface that `Engine` satisfies, and a `Manager[S, O]` that schedules any
-`Reconciler`. Configuration is a plain `Policy` struct for the engine and
-functional options (`ManagerOption`) for the manager.
+`Reconciler`. Configuration is a plain `Policy` struct plus functional options
+(`EngineOption`, for the clock) for the engine and functional options
+(`ManagerOption`) for the manager.
 
 ## Decision drivers
 
@@ -50,16 +51,18 @@ functional options (`ManagerOption`) for the manager.
 
 For configuration, a validated `Policy` struct was preferred over options for
 the engine because every field is a plain bound that callers want to write
-literally; the manager uses options for its optional status sink because its
-required arguments (reconciler, limit, clone function) are positional.
+literally. Optional collaborators that most callers leave at their defaults
+(the engine's `Clock`; the manager's `ManagerClock` and status sink) are
+functional options, so required arguments stay positional and new optional
+settings do not change constructor signatures.
 
 ## Decision
 
 We will expose `Adapter[S, O, A, U]`, `Engine[S, O, A, U]` with
-`NewEngine(adapter, policy)`, the `Reconciler[S, O]` interface and
+`NewEngine(adapter, policy, options...)`, the `Reconciler[S, O]` interface and
 `Manager[S, O]` with `NewManager(reconciler, limit, cloneSpec, options...)`.
 Inputs are validated at use: `Engine.Reconcile` validates the desired value,
-policy and adapter before calling the adapter; `NewManager` validates its
+policy, adapter and clock before calling the adapter; `NewManager` validates its
 arguments and returns an error.
 
 ## Consequences

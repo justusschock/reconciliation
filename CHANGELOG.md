@@ -9,23 +9,16 @@ While the major version is 0, a minor release may break the API.
 
 Preparation for the first public release.
 
-### Removed
-
-- **Breaking:** the test-only clock injection API: `Clock`, `EngineOption`,
-  `WithClock`, `ManagerClock`, `WithManagerClock` and `ErrNilClock`.
-  `NewEngine` now takes only an adapter and a policy; existing two-argument
-  calls compile unchanged. Engine retries and manager requeues use standard
-  library timers; test code built on this library should use
-  `testing/synctest` for virtual time (ADR-0010).
-- The unused `internal/conformance` package (never part of the public API).
-
 ### Changed
 
 - **Breaking:** the minimum Go version is now 1.25 (was 1.22), because the
   test suite uses `testing/synctest`. CI tests Go 1.25, `oldstable` and
   `stable` (ADR-0011).
 - Time- and concurrency-dependent tests run on `testing/synctest` virtual
-  time instead of fake clocks, polling and wall-clock timeouts.
+  time instead of fake clocks, polling and wall-clock timeouts. The public
+  clock options (`Clock`, `EngineOption`, `WithClock`, `ManagerClock`,
+  `WithManagerClock`, `ErrNilClock`) are unchanged and keep dedicated tests
+  (ADR-0010).
 - CI no longer uses a token secret to fetch dependencies; every action is
   pinned to a commit SHA, a golangci-lint job was added, and the pre-commit
   step (with its Python setup) was dropped from CI (ADR-0013).
@@ -34,6 +27,7 @@ Preparation for the first public release.
 ### Added
 
 - Package documentation and doc comments for every exported identifier.
+- A unit test for the internal `conformance.Adapter` test helper.
 - `ExampleEngine_Reconcile`, a complete adapter example.
 - `NOTICE`, `AGENTS.md`, and `docs/` with a retrospective PRD and ADRs.
 

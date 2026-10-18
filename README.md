@@ -28,6 +28,9 @@ re-implement these mechanics, and their edge cases, for every resource.
 - **Keyed manager.** `Manager[S, O]` runs one call per key at a time, bounds
   concurrently active keys, coalesces equal generations, supersedes stale
   pending ones, honours delayed requeues and shuts down gracefully.
+- **Pluggable time source.** Retry delays and delayed requeues use the
+  standard library clock unless you supply a `Clock` (`WithClock`) or a
+  `ManagerClock` (`WithManagerClock`).
 - **Status events.** `WithStatusSink` and `EventStream` report every phase
   without letting a slow consumer block reconciliation.
 - **Handoff.** The `handoff` package exports and adopts pending desired
@@ -183,6 +186,20 @@ generation pending until an absolute deadline, visible as
 fails pending work with `concurrency.ErrClosed`, lets active work finish
 until its context ends, then cancels it with one shutdown cause.
 
+### Clocks
+
+By default the engine waits between retries with `time.After`, and the
+manager schedules requeues with `time.Now` and `time.After`. To run against
+another time source, for example a simulation or a manually advanced test
+clock, pass `reconciliation.WithClock(clock)` to `NewEngine` (a `Clock` has
+one method, `After(time.Duration) <-chan time.Time`) or
+`reconciliation.WithManagerClock(clock)` to `NewManager` (a `ManagerClock`
+adds `Now() time.Time`, which determines `Pending.RetryAt`). Clocks must be
+safe for concurrent use and `After` must return a non-nil channel; a nil
+clock or a nil channel is reported with `ErrNilClock`. Because the defaults
+are the standard library timers, code built on this library can also be
+tested with `testing/synctest` without supplying a clock.
+
 ### Status
 
 Carry a `StatusSink` through a call with `WithStatusSink`, or configure one
@@ -210,11 +227,12 @@ return an independently owned value (for example `bytes.Clone(data)`).
 | [`github.com/justusschock/go-reconciliation`](https://pkg.go.dev/github.com/justusschock/go-reconciliation) | Plans, engine, retry policy, manager and status events. |
 | [`github.com/justusschock/go-reconciliation/handoff`](https://pkg.go.dev/github.com/justusschock/go-reconciliation/handoff) | Export and adoption of pending work through lifecycle artifacts. |
 
-Packages under `internal/` (none at present) are not part of the API.
+Packages under `internal/` (currently `internal/conformance`, a
+function-field `Adapter` used for testing) are not part of the API.
 
 ## Design and guarantees
 
-- **Concurrency.** `Engine` does not serialize calls; adapters and
+- **Concurrency.** `Engine` does not serialize calls; adapters, clocks and
   `Policy.Jitter` shared by concurrent calls must be safe for concurrent
   use. `Manager` and `EventStream` are safe for concurrent use. The test
   suite runs under the race detector.
