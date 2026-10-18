@@ -40,7 +40,7 @@ func managerResult(desired Desired[managerSpec], observed string) Result[string]
 	return Result[string]{Key: desired.Key, Generation: desired.Generation, Observed: observed}
 }
 
-// FR-RECON-10
+// FR-RECON-10, FR-RECON-20
 func TestNewManagerValidatesRequiredConfiguration(t *testing.T) {
 	reconciler := reconcilerFunc[managerSpec, string](func(_ context.Context, desired Desired[managerSpec]) (Result[string], error) {
 		return managerResult(desired, "ok"), nil
@@ -55,6 +55,13 @@ func TestNewManagerValidatesRequiredConfiguration(t *testing.T) {
 	var nilReconciler *stubReconciler
 	if _, err := NewManager[managerSpec, string](nilReconciler, 1, cloneManagerSpec); !errors.Is(err, ErrNilReconciler) {
 		t.Fatalf("NewManager() reconciler error = %v, want ErrNilReconciler", err)
+	}
+	if _, err := NewManager(reconciler, 1, cloneManagerSpec, WithManagerClock(nil)); !errors.Is(err, ErrNilClock) {
+		t.Fatalf("NewManager() nil clock error = %v, want ErrNilClock", err)
+	}
+	var nilClock *fakeManagerClock
+	if _, err := NewManager(reconciler, 1, cloneManagerSpec, WithManagerClock(nilClock)); !errors.Is(err, ErrNilClock) {
+		t.Fatalf("NewManager() typed-nil clock error = %v, want ErrNilClock", err)
 	}
 }
 

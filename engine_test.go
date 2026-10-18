@@ -5,7 +5,6 @@ import (
 	"errors"
 	"reflect"
 	"slices"
-	"sync"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -103,7 +102,7 @@ func TestEngineAppliesStablePlanAndOwnsUndoProvenance(t *testing.T) {
 	}
 }
 
-// FR-RECON-05
+// FR-RECON-05, FR-RECON-20
 func TestEngineRejectsInvalidConfigurationBeforeAdapterCalls(t *testing.T) {
 	calls := 0
 	adapter := &engineAdapter{
@@ -131,6 +130,9 @@ func TestEngineRejectsInvalidConfigurationBeforeAdapterCalls(t *testing.T) {
 	}
 	var nilClock *recordingClock
 	if _, err := NewEngine(adapter, enginePolicy(1), WithClock(nilClock)).Reconcile(context.Background(), engineDesired()); !errors.Is(err, ErrNilClock) {
+		t.Fatalf("typed-nil clock error = %v, want ErrNilClock", err)
+	}
+	if _, err := NewEngine(adapter, enginePolicy(1), WithClock(nil)).Reconcile(context.Background(), engineDesired()); !errors.Is(err, ErrNilClock) {
 		t.Fatalf("nil clock error = %v, want ErrNilClock", err)
 	}
 	if calls != 0 {
@@ -676,40 +678,6 @@ func engineDesired() Desired[engineSpec] {
 func enginePolicy(maxAttempts int) Policy {
 	return Policy{MaxAttempts: maxAttempts}
 }
-
-type recordingClock struct {
-	mu        sync.Mutex
-	delays    []time.Duration
-	immediate bool
-	block     bool
-	called    chan struct{}
-	callOnce  sync.Once
-}
-
-func (clock *recordingClock) After(delay time.Duration) <-chan time.Time {
-	clock.mu.Lock()
-	clock.delays = append(clock.delays, delay)
-	clock.mu.Unlock()
-	if clock.called != nil {
-		clock.callOnce.Do(func() { close(clock.called) })
-	}
-	channel := make(chan time.Time, 1)
-	if clock.immediate {
-		channel <- time.Time{}
-	}
-	if !clock.block && !clock.immediate {
-		channel <- time.Time{}
-	}
-	return channel
-}
-
-func (clock *recordingClock) Delays() []time.Duration {
-	clock.mu.Lock()
-	defer clock.mu.Unlock()
-	return slices.Clone(clock.delays)
-}
-
-var _ Clock = (*recordingClock)(nil)
 
 // FR-RECON-05
 func TestEngineResultShapeIsStable(t *testing.T) {
