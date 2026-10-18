@@ -18,18 +18,22 @@ type Adapter[S, O, A, U any] struct {
 
 var _ reconciliation.Adapter[struct{}, struct{}, struct{}, struct{}] = Adapter[struct{}, struct{}, struct{}, struct{}]{}
 
+// Observe calls ObserveFunc.
 func (adapter Adapter[S, O, A, U]) Observe(ctx context.Context, key reconciliation.Key) (O, error) {
 	return adapter.ObserveFunc(ctx, key)
 }
 
+// Plan calls PlanFunc.
 func (adapter Adapter[S, O, A, U]) Plan(ctx context.Context, desired reconciliation.Desired[S], observed O) (reconciliation.Plan[A], error) {
 	return adapter.PlanFunc(ctx, desired, observed)
 }
 
+// Apply calls ApplyFunc.
 func (adapter Adapter[S, O, A, U]) Apply(ctx context.Context, action reconciliation.Action[A]) (reconciliation.Undo[U], error) {
 	return adapter.ApplyFunc(ctx, action)
 }
 
+// Undo calls UndoFunc.
 func (adapter Adapter[S, O, A, U]) Undo(ctx context.Context, undo reconciliation.Undo[U]) error {
 	return adapter.UndoFunc(ctx, undo)
 }

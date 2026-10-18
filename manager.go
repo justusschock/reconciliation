@@ -30,8 +30,10 @@ type Reconciler[S, O any] interface {
 // clone function because generic specifications may contain reference values.
 type CloneSpec[S any] func(S) S
 
-// ManagerClock supplies absolute time and retry deadlines. Implementations must
-// be safe for concurrent use.
+// ManagerClock supplies absolute time and retry deadlines. Now determines
+// Pending.RetryAt for delayed requeues and After schedules them; After must
+// return a non-nil channel. Implementations must be safe for concurrent use.
+// The default clock uses time.Now and time.After.
 type ManagerClock interface {
 	Now() time.Time
 	After(time.Duration) <-chan time.Time
@@ -40,7 +42,8 @@ type ManagerClock interface {
 // ManagerOption configures a Manager.
 type ManagerOption func(*managerConfig)
 
-// WithManagerClock replaces the clock used for delayed requeues.
+// WithManagerClock replaces the clock used for delayed requeues. NewManager
+// rejects a nil or typed-nil clock with ErrNilClock.
 func WithManagerClock(clock ManagerClock) ManagerOption {
 	return func(config *managerConfig) {
 		config.clock = clock

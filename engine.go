@@ -12,12 +12,16 @@ import (
 var (
 	// ErrNilAdapter identifies a nil or typed-nil engine adapter.
 	ErrNilAdapter = errors.New("reconciliation: nil adapter")
-	// ErrNilClock identifies a nil or typed-nil retry clock.
+	// ErrNilClock identifies a nil or typed-nil clock supplied through
+	// WithClock or WithManagerClock, or a clock whose After returned a nil
+	// channel.
 	ErrNilClock = errors.New("reconciliation: nil clock")
 )
 
 // Clock supplies retry deadlines. After must return a non-nil channel.
 // Implementations must be safe for concurrent use by reconciliation calls.
+// The default clock uses time.After, so tests may also run an Engine inside a
+// testing/synctest bubble instead of supplying a Clock.
 type Clock interface {
 	After(time.Duration) <-chan time.Time
 }
@@ -25,7 +29,9 @@ type Clock interface {
 // EngineOption configures an Engine.
 type EngineOption func(*engineConfig)
 
-// WithClock replaces the clock used for retry delays.
+// WithClock replaces the clock used for retry delays. A nil or typed-nil
+// clock makes every Reconcile call fail with ErrNilClock before the adapter
+// is called. Nil options passed to NewEngine are ignored.
 func WithClock(clock Clock) EngineOption {
 	return func(config *engineConfig) {
 		config.clock = clock
@@ -46,7 +52,9 @@ type Engine[S, O, A, U any] struct {
 	clock   Clock
 }
 
-// NewEngine constructs a one-shot reconciliation engine.
+// NewEngine constructs a one-shot reconciliation engine. The adapter, policy
+// and clock are validated by every Reconcile call rather than here, so a
+// misconfigured Engine reports the problem through Reconcile's error.
 func NewEngine[S, O, A, U any](adapter Adapter[S, O, A, U], policy Policy, options ...EngineOption) *Engine[S, O, A, U] {
 	config := engineConfig{clock: systemClock{}}
 	for _, option := range options {
