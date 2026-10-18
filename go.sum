@@ -1,4 +1,4 @@
-github.com/justusschock/concurrency v0.2.0 h1:cA+hFDK4nW5o3MkNSDfSVAKFdohDtjqjc3Dfq1yt5kQ=
-github.com/justusschock/concurrency v0.2.0/go.mod h1:mlyzGk0mRK7T9f1MgeCqtSbWdltxvR8b41GOdGpDEak=
-github.com/justusschock/lifecycle v0.2.0 h1:3hCn39gyLrO8LPwiPe0uM0jSsSWjHHkRm4M4bKITEh0=
-github.com/justusschock/lifecycle v0.2.0/go.mod h1:wwvVMYP6BNJQJ/owowZVtXFvZUq+2vXsE3AwnGL4TKU=
+github.com/justusschock/concurrency v0.1.0 h1:Nqa0eoTri1k1k+pNSp2B68Ynu8IahORxdhPj+tpSMBA=
+github.com/justusschock/concurrency v0.1.0/go.mod h1:WXFFKeSehthmemNPkSDwfnWrp0qC0SJgXrYoGCtdQVc=
+github.com/justusschock/lifecycle v0.1.0 h1:1CBVBjKqPgTpWBOzElFEONGONMAk6noYC4pus2qW8WQ=
+github.com/justusschock/lifecycle v0.1.0/go.mod h1:KhYsArgpLu7ej03s/0+EcCoEdHceKAldbv47Tr4o2dU=
