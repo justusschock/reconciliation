@@ -49,7 +49,7 @@ Preparation for the first public release.
 - Define codec buffer/value ownership and add compile-checked DAG, manager, and
   handoff examples.
 - Support Go 1.22 and test Go 1.22 through Go 1.26 in GitHub Actions.
-- Require `go-concurrency` and `go-lifecycle` at `v0.2.0`.
+- Require `concurrency` and `lifecycle` at `v0.2.0`.
 
-[Unreleased]: https://github.com/justusschock/go-reconciliation/compare/v0.2.0...HEAD
-[0.2.0]: https://github.com/justusschock/go-reconciliation/releases/tag/v0.2.0
+[Unreleased]: https://github.com/justusschock/reconciliation/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/justusschock/reconciliation/releases/tag/v0.2.0

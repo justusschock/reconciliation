@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	reconciliation "github.com/justusschock/go-reconciliation"
+	reconciliation "github.com/justusschock/reconciliation"
 )
 
 // settings is a toy environment whose observed state is a map of names to

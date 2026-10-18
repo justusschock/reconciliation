@@ -13,10 +13,10 @@
 Recorded retrospectively. The module depends on the standard library and two
 sibling libraries by the same author:
 
-- `github.com/justusschock/go-concurrency` for `Future` (the result type of
+- `github.com/justusschock/concurrency` for `Future` (the result type of
   `Manager.Submit`), `Failed`, `Go`, and the shared sentinels
   `ErrInvalidLimit` and `ErrClosed`.
-- `github.com/justusschock/go-lifecycle` (root and `handoff` packages) for
+- `github.com/justusschock/lifecycle` (root and `handoff` packages) for
   the integrity-checked artifact envelope, its validation, and the
   `ErrInvalidArtifact`/`ErrIntegrity` sentinels used by the `handoff`
   package.
@@ -49,8 +49,8 @@ There are no third-party dependencies.
 
 ## Decision
 
-We will depend only on the standard library, `go-concurrency` and
-`go-lifecycle`. Any new dependency, including another sibling library,
+We will depend only on the standard library, `concurrency` and
+`lifecycle`. Any new dependency, including another sibling library,
 requires an ADR. The library performs no logging and keeps no global state.
 
 ## Consequences

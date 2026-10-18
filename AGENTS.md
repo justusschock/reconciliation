@@ -1,10 +1,10 @@
 # AGENTS.md
 
-Rules for anyone, human or agent, changing go-reconciliation. They are
+Rules for anyone, human or agent, changing reconciliation. They are
 binding. If a change has to break one, say so in the pull request and, where
 it is a design decision, record it in an ADR.
 
-go-reconciliation is a generic Go library for converging desired state toward
+reconciliation is a generic Go library for converging desired state toward
 observed state: validated action DAGs, a retrying and rolling-back engine, a
 keyed manager, status events and lifecycle handoff of pending work. Its
 requirements and design decisions are recorded in [docs/](docs/README.md).
@@ -59,7 +59,7 @@ No behaviour is added or changed before the documents that govern it say so.
   the optional `Clock`/`ManagerClock` time sources, and status reporting
   (`StatusSink`, `EventStream`).
 - `handoff/`: export and adoption of pending desired state through
-  `go-lifecycle` artifacts (the library's only wire format, ADR-0009).
+  `lifecycle` artifacts (the library's only wire format, ADR-0009).
 - `internal/conformance/`: a function-field `Adapter` test helper; not part
   of the API. Implementation-only packages go under `internal/`.
 - `docs/`: PRD, ADRs and their index.
@@ -70,8 +70,8 @@ No behaviour is added or changed before the documents that govern it say so.
 1. **Small, explicit contracts.** Every exported type and function documents
    its behaviour, errors, concurrency safety and cancellation.
 2. **Dependencies.** Standard library first. Besides it, only
-   `github.com/justusschock/go-concurrency` and
-   `github.com/justusschock/go-lifecycle` are allowed (ADR-0003); any new
+   `github.com/justusschock/concurrency` and
+   `github.com/justusschock/lifecycle` are allowed (ADR-0003); any new
    dependency needs an ADR.
 3. **Errors.** Sentinel errors and typed errors are part of the API; wrap
    with `%w` and test with `errors.Is`/`errors.As`.

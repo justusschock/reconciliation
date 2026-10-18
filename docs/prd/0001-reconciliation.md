@@ -1,4 +1,4 @@
-# PRD 0001: go-reconciliation
+# PRD 0001: reconciliation
 
 | Field | Value |
 |---|---|
@@ -23,7 +23,7 @@ plan, a rollback undoes something a surviving change still depends on, a
 cancelled caller suppresses cleanup, a slow status consumer stalls the loop,
 or pending work is lost when a process hands over to its successor.
 
-`go-reconciliation` provides these mechanics once, generically, so that a
+`reconciliation` provides these mechanics once, generically, so that a
 caller only writes the domain-specific part: an `Adapter` that observes,
 plans, applies and undoes. It does not model any particular resource, store
 or transport.
@@ -95,7 +95,7 @@ or transport.
 | FR-RECON-14 | The `Submit` context controls admission only. `Close` stops admission and fails pending work with `concurrency.ErrClosed`, lets active work finish until its context ends, then cancels active work with one selected shutdown cause that every `Close` call returns. | MUST |
 | FR-RECON-15 | A `StatusSink` carried by `WithStatusSink` (or configured with `WithManagerStatusSink`) receives queued, observing, planning, applying, retrying, rolling-back, succeeded and failed events; a manager publishes `StatusQueued` before the work can start. | MUST |
 | FR-RECON-16 | `EventStream` gives each subscriber an independent bounded queue, never blocks publishers, reports omitted events with a `StatusDropped` count, closes idempotently and safely under concurrent publishing, and rejects a non-positive capacity. | MUST |
-| FR-RECON-17 | `handoff.Exporter` and `handoff.Adopter` round-trip pending desired values and absolute retry deadlines through a `go-lifecycle` artifact with a fixed media type and schema version 1, canonical key order and UTC deadlines, carrying no other state. | MUST |
+| FR-RECON-17 | `handoff.Exporter` and `handoff.Adopter` round-trip pending desired values and absolute retry deadlines through a `lifecycle` artifact with a fixed media type and schema version 1, canonical key order and UTC deadlines, carrying no other state. | MUST |
 | FR-RECON-18 | Adoption rejects wrong media types, unsupported versions, digest mismatches, invalid or duplicate entries, invalid deadlines, unknown fields and trailing data; export rejects invalid or duplicate entries and unencodable deadlines; nil codecs are rejected; codec errors and context causes are preserved. | MUST |
 | FR-RECON-19 | Export copies each codec output before the next `Marshal` call; adopted specifications do not alias artifact bytes when the codec honours its ownership contract. | MUST |
 | FR-RECON-20 | Engine retry delays and manager requeues use the standard library clock by default; a `Clock` supplied with `WithClock` or a `ManagerClock` supplied with `WithManagerClock` replaces it (the manager clock's `Now` also determines `Pending.RetryAt`). A nil or typed-nil clock, or an `After` that returns a nil channel, is reported with `ErrNilClock`. | MUST |
@@ -109,7 +109,7 @@ or transport.
 | NFR-RECON-03 | Error stability: failure categories are sentinels matched with `errors.Is`; messages never serialize specifications or undo values. | Sentinel assertions throughout the suite |
 | NFR-RECON-04 | Toolchain: the module's floor is Go 1.25 with no `toolchain` or `replace` directive. | `TestModuleCompatibilityPolicy` |
 | NFR-RECON-05 | Supply chain: CI uses only `push`/`pull_request` triggers, read-only permissions, SHA-pinned actions and no secrets. | `TestCIWorkflowPolicy` |
-| NFR-RECON-06 | Dependencies: standard library plus `go-concurrency` and `go-lifecycle` only; no logging or global state. | `go.mod` review (ADR-0003) |
+| NFR-RECON-06 | Dependencies: standard library plus `concurrency` and `lifecycle` only; no logging or global state. | `go.mod` review (ADR-0003) |
 | NFR-RECON-07 | Test determinism: time- and concurrency-dependent tests use `testing/synctest` virtual time; no real sleeps. Clock option tests supply fake clocks inside a bubble. | ADR-0012 |
 
 ## 6. API sketch

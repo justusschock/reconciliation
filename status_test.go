@@ -10,7 +10,7 @@ import (
 	"testing/synctest"
 	"time"
 
-	"github.com/justusschock/go-concurrency"
+	"github.com/justusschock/concurrency"
 )
 
 type recordingStatusSink struct {

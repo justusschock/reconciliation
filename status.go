@@ -4,7 +4,7 @@ import (
 	"context"
 	"sync"
 
-	"github.com/justusschock/go-concurrency"
+	"github.com/justusschock/concurrency"
 )
 
 // StatusPhase identifies a resource-independent reconciliation phase.

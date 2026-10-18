@@ -4,7 +4,7 @@ package conformance
 import (
 	"context"
 
-	"github.com/justusschock/go-reconciliation"
+	"github.com/justusschock/reconciliation"
 )
 
 // Adapter implements reconciliation.Adapter with independently supplied

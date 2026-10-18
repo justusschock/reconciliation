@@ -12,7 +12,7 @@
 
 Recorded retrospectively. When a process hands over to a successor, pending
 work should not be lost. The `handoff` package exports `[]Pending[S]` (desired
-value plus absolute retry deadline) into a `go-lifecycle/handoff` artifact
+value plus absolute retry deadline) into a `lifecycle/handoff` artifact
 and adopts it on the other side. This is the library's only persistence or
 wire format.
 

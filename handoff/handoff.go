@@ -13,9 +13,9 @@ import (
 	"slices"
 	"time"
 
-	lifecycle "github.com/justusschock/go-lifecycle"
-	lifecyclehandoff "github.com/justusschock/go-lifecycle/handoff"
-	reconciliation "github.com/justusschock/go-reconciliation"
+	lifecycle "github.com/justusschock/lifecycle"
+	lifecyclehandoff "github.com/justusschock/lifecycle/handoff"
+	reconciliation "github.com/justusschock/reconciliation"
 )
 
 const (

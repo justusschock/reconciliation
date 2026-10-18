@@ -1,7 +1,7 @@
-# go-reconciliation documentation
+# reconciliation documentation
 
 Requirements (PRDs) and architecture decisions (ADRs) for
-`github.com/justusschock/go-reconciliation`. The process is described in
+`github.com/justusschock/reconciliation`. The process is described in
 [ADR-0001](adr/0001-record-architecture-decisions.md) and
 [AGENTS.md](../AGENTS.md). New documents start from the templates:
 [PRD template](prd/TEMPLATE.md), [ADR template](adr/TEMPLATE.md).
@@ -10,7 +10,7 @@ Requirements (PRDs) and architecture decisions (ADRs) for
 
 | PRD | Title | Status | Implementation |
 |---|---|---|---|
-| [0001](prd/0001-go-reconciliation.md) | go-reconciliation | Accepted | Complete |
+| [0001](prd/0001-reconciliation.md) | reconciliation | Accepted | Complete |
 
 ## Architecture decisions
 

@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"time"
 
-	reconciliation "github.com/justusschock/go-reconciliation"
-	reconciliationhandoff "github.com/justusschock/go-reconciliation/handoff"
+	reconciliation "github.com/justusschock/reconciliation"
+	reconciliationhandoff "github.com/justusschock/reconciliation/handoff"
 )
 
 // FR-RECON-17, NFR-RECON-01

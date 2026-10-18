@@ -5,8 +5,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/justusschock/go-reconciliation"
-	"github.com/justusschock/go-reconciliation/internal/conformance"
+	"github.com/justusschock/reconciliation"
+	"github.com/justusschock/reconciliation/internal/conformance"
 )
 
 func TestAdapterDelegatesToFunctions(t *testing.T) {

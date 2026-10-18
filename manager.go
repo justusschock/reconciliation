@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/justusschock/go-concurrency"
+	"github.com/justusschock/concurrency"
 )
 
 var (

@@ -1,6 +1,6 @@
-# go-reconciliation
+# reconciliation
 
-`go-reconciliation` is a Go library for converging desired state toward
+`reconciliation` is a Go library for converging desired state toward
 observed state. You describe your domain once, as an adapter that observes,
 plans, applies and undoes; the library handles the control loop around it:
 validated action graphs with a deterministic order, classified retries with
@@ -35,7 +35,7 @@ re-implement these mechanics, and their edge cases, for every resource.
   without letting a slow consumer block reconciliation.
 - **Handoff.** The `handoff` package exports and adopts pending desired
   state and absolute retry deadlines as integrity-checked
-  `go-lifecycle` artifacts.
+  `lifecycle` artifacts.
 
 The module defines no domain resources, persistence, leader election,
 transport or daemon, and performs no logging.
@@ -43,12 +43,12 @@ transport or daemon, and performs no logging.
 ## Installation
 
 ```sh
-go get github.com/justusschock/go-reconciliation@latest
+go get github.com/justusschock/reconciliation@latest
 ```
 
 Requires Go 1.25 or newer. Dependencies: the standard library,
-[`go-concurrency`](https://github.com/justusschock/go-concurrency) and
-[`go-lifecycle`](https://github.com/justusschock/go-lifecycle).
+[`concurrency`](https://github.com/justusschock/concurrency) and
+[`lifecycle`](https://github.com/justusschock/lifecycle).
 
 ## Quick start
 
@@ -224,8 +224,8 @@ return an independently owned value (for example `bytes.Clone(data)`).
 
 | Package | Description |
 |---|---|
-| [`github.com/justusschock/go-reconciliation`](https://pkg.go.dev/github.com/justusschock/go-reconciliation) | Plans, engine, retry policy, manager and status events. |
-| [`github.com/justusschock/go-reconciliation/handoff`](https://pkg.go.dev/github.com/justusschock/go-reconciliation/handoff) | Export and adoption of pending work through lifecycle artifacts. |
+| [`github.com/justusschock/reconciliation`](https://pkg.go.dev/github.com/justusschock/reconciliation) | Plans, engine, retry policy, manager and status events. |
+| [`github.com/justusschock/reconciliation/handoff`](https://pkg.go.dev/github.com/justusschock/reconciliation/handoff) | Export and adoption of pending work through lifecycle artifacts. |
 
 Packages under `internal/` (currently `internal/conformance`, a
 function-field `Adapter` used for testing) are not part of the API.
@@ -254,7 +254,7 @@ function-field `Adapter` used for testing) are not part of the API.
 
 - [docs/README.md](docs/README.md): requirements (PRD) and architecture
   decision records.
-- API reference on [pkg.go.dev](https://pkg.go.dev/github.com/justusschock/go-reconciliation).
+- API reference on [pkg.go.dev](https://pkg.go.dev/github.com/justusschock/reconciliation).
 
 ## Contributing
 
