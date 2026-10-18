@@ -1,55 +1,136 @@
 # go-reconciliation
 
-`go-reconciliation` provides building blocks for converging
-generic desired state toward observed state. It models deterministic action
-DAGs, one-shot reconciliation with retries and rollback, bounded keyed work
-management, non-blocking status delivery, and lifecycle handoff of pending
-work.
+`go-reconciliation` is a Go library for converging desired state toward
+observed state. You describe your domain once, as an adapter that observes,
+plans, applies and undoes; the library handles the control loop around it:
+validated action graphs with a deterministic order, classified retries with
+bounded backoff, dependency-safe rollback, keyed scheduling of many
+reconciliations, non-blocking status reporting, and handoff of pending work
+to a successor process. It is for authors of controllers, operators and
+services that keep an external system in a desired state and do not want to
+re-implement these mechanics, and their edge cases, for every resource.
 
-Module path: `github.com/justusschock/go-reconciliation`
+## Features
 
-## What it provides
+- **Action DAGs.** `Plan[A]` actions declare runtime dependencies;
+  `ValidatePlan` and `Ordered` reject invalid graphs and produce a stable
+  topological order, including branches that later converge.
+- **One-shot engine.** `Engine[S, O, A, U]` observes, plans, validates the
+  whole plan before mutating, applies, and verifies with a fresh
+  observation.
+- **Classified retries.** Errors wrapped with `Transient` or `Conflict` are
+  retried with exponential, capped, optionally jittered backoff;
+  `Permanent`, unclassified and context errors are not.
+- **Dependency-safe rollback.** Completed reversible actions are undone in
+  reverse order, without removing anything a surviving action still needs,
+  under a bounded cleanup deadline that caller cancellation cannot
+  suppress.
+- **Keyed manager.** `Manager[S, O]` runs one call per key at a time, bounds
+  concurrently active keys, coalesces equal generations, supersedes stale
+  pending ones, honours delayed requeues and shuts down gracefully.
+- **Status events.** `WithStatusSink` and `EventStream` report every phase
+  without letting a slow consumer block reconciliation.
+- **Handoff.** The `handoff` package exports and adopts pending desired
+  state and absolute retry deadlines as integrity-checked
+  `go-lifecycle` artifacts.
 
-- `Plan[A]` validates arbitrary dependency DAGs, including branches that later
-  converge, and produces a stable topological order.
-- `Engine[S,O,A,U]` observes, plans, applies, verifies, retries classified
-  failures, and rolls back completed reversible actions in dependency-safe
-  reverse order.
-- `Manager[S,O]` serializes work per key, bounds concurrently active keys,
-  coalesces identical generations, supersedes stale pending generations, and
-  preserves delayed requeues.
-- `EventStream` broadcasts phase changes without allowing a slow subscriber to
-  block reconciliation.
-- `handoff.Exporter` and `handoff.Adopter` transfer pending desired values and
-  absolute retry deadlines through integrity-checked `go-lifecycle` artifacts.
+The module defines no domain resources, persistence, leader election,
+transport or daemon, and performs no logging.
 
-The module does not define product resources, persistence, leader election,
-remote transport, or a daemon. Adapters own the side effects and domain types.
+## Installation
 
-## Install the private module
-
-Version `v0.2.0` requires Go 1.22 or newer. It resolves both private sibling
-modules, `go-concurrency` and `go-lifecycle`, at `v0.2.0`.
-
-You need access to this repository and its private dependencies. Configure a
-Git credential helper or SSH agent; do not place access tokens in Git URLs,
-source files, `go env`, or shell history. GitHub CLI can configure Git's
-credential helper after browser authentication:
-
-```bash
-gh auth login --hostname github.com --git-protocol https --web
-gh auth setup-git --hostname github.com
+```sh
+go get github.com/justusschock/go-reconciliation@latest
 ```
 
-Tell Go that the module family is private, then install it:
+Requires Go 1.25 or newer. Dependencies: the standard library,
+[`go-concurrency`](https://github.com/justusschock/go-concurrency) and
+[`go-lifecycle`](https://github.com/justusschock/go-lifecycle).
 
-```bash
-go env -w GOPRIVATE='github.com/justusschock/*'
-go env -w GONOSUMDB='github.com/justusschock/*'
-go get github.com/justusschock/go-reconciliation@v0.2.0
+## Quick start
+
+Implement `Adapter` for your environment. Here the environment is a map of
+settings; `Apply` returns the previous value so the engine can undo it
+(from [`ExampleEngine_Reconcile`](example_test.go)):
+
+```go
+type settings struct {
+	mu      sync.Mutex
+	current map[string]string
+}
+
+type set struct{ Name, Value string }
+
+type previous struct {
+	Name, Value string
+	Present     bool
+}
+
+func (s *settings) Observe(context.Context, reconciliation.Key) (map[string]string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return maps.Clone(s.current), nil
+}
+
+func (s *settings) Plan(_ context.Context, desired reconciliation.Desired[map[string]string], observed map[string]string) (reconciliation.Plan[set], error) {
+	var plan reconciliation.Plan[set]
+	for _, name := range slices.Sorted(maps.Keys(desired.Spec)) {
+		if value := desired.Spec[name]; observed[name] != value {
+			plan.Actions = append(plan.Actions, reconciliation.Action[set]{
+				ID:         reconciliation.ActionID("set/" + name),
+				Value:      set{Name: name, Value: value},
+				Reversible: true,
+			})
+		}
+	}
+	return plan, nil
+}
+
+func (s *settings) Apply(_ context.Context, action reconciliation.Action[set]) (reconciliation.Undo[previous], error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	value, present := s.current[action.Value.Name]
+	s.current[action.Value.Name] = action.Value.Value
+	return reconciliation.Undo[previous]{Value: previous{Name: action.Value.Name, Value: value, Present: present}}, nil
+}
+
+func (s *settings) Undo(_ context.Context, undo reconciliation.Undo[previous]) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if undo.Value.Present {
+		s.current[undo.Value.Name] = undo.Value.Value
+	} else {
+		delete(s.current, undo.Value.Name)
+	}
+	return nil
+}
 ```
 
-## Build and order an action DAG
+Then construct an engine and reconcile one generation:
+
+```go
+env := &settings{current: map[string]string{"replicas": "1"}}
+engine := reconciliation.NewEngine(env, reconciliation.Policy{
+	MaxAttempts:     3,
+	BaseDelay:       100 * time.Millisecond,
+	MaxDelay:        2 * time.Second,
+	AttemptTimeout:  30 * time.Second,
+	RollbackTimeout: 15 * time.Second,
+})
+
+result, err := engine.Reconcile(context.Background(), reconciliation.Desired[map[string]string]{
+	Key:        "service/api",
+	Generation: 1,
+	Spec:       map[string]string{"image": "api:v2", "replicas": "3"},
+})
+if err != nil {
+	panic(err)
+}
+fmt.Println(result.Changed, result.Observed["image"], result.Observed["replicas"])
+// Output: true api:v2 3
+```
+
+### Plans
 
 Dependencies are runtime prerequisites. Branches can fan out and a later
 action can depend on every branch:
@@ -62,59 +143,18 @@ plan := reconciliation.Plan[string]{Actions: []reconciliation.Action[string]{
 	{ID: "publish", DependsOn: []reconciliation.ActionID{"configure", "validate"}},
 }}
 
-ordered, err := reconciliation.Ordered(plan)
+ordered, err := reconciliation.Ordered(plan) // fetch, configure, validate, publish
 ```
 
-`Ordered` rejects empty or duplicate IDs, missing or duplicate dependencies,
-and cycles. Among currently ready actions it chooses the lexicographically
-smallest ID, so equivalent plans produce the same order. See the
-compile-checked [`ExampleOrdered`](example_test.go).
+`Ordered` rejects empty or duplicate IDs, missing or duplicate dependencies
+and cycles. Among ready actions it picks the lexicographically smallest ID,
+so equivalent plans produce the same order ([`ExampleOrdered`](example_test.go)).
 
-## Reconcile once
-
-Implement the generic adapter around your environment:
-
-```go
-type Adapter[S, O, A, U any] interface {
-	Observe(context.Context, reconciliation.Key) (O, error)
-	Plan(context.Context, reconciliation.Desired[S], O) (reconciliation.Plan[A], error)
-	Apply(context.Context, reconciliation.Action[A]) (reconciliation.Undo[U], error)
-	Undo(context.Context, reconciliation.Undo[U]) error
-}
-```
-
-Then construct an engine and reconcile one generation:
-
-```go
-engine := reconciliation.NewEngine(adapter, reconciliation.Policy{
-	MaxAttempts:     3,
-	BaseDelay:       100 * time.Millisecond,
-	MaxDelay:        2 * time.Second,
-	AttemptTimeout:  30 * time.Second,
-	RollbackTimeout: 15 * time.Second,
-})
-
-result, err := engine.Reconcile(ctx, reconciliation.Desired[Spec]{
-	Key: "service/api", Generation: 7, Spec: desired,
-})
-```
-
-Wrap retryable adapter errors with `reconciliation.Transient` or
-`reconciliation.Conflict`. `Permanent` failures, unclassified failures,
-context cancellation, and exhausted attempts are not retried. Every retry
-starts with a fresh observation and plan.
-
-An `Apply` error means that action did not complete and its returned undo value
-is unusable. On later failure, the engine attempts to undo completed reversible
-actions. If an action cannot be undone, the result remains changed and the
-engine retains its completed dependency closure rather than undoing state that
-the surviving action still requires.
-
-## Manage keyed work
+### Managing keyed work
 
 `Manager` adds keyed serialization and a concurrency limit around any
-`Reconciler` (including an `Engine`). A clone function is mandatory because
-generic specifications may contain maps, slices, or pointers:
+`Reconciler`, including an `Engine`. A clone function is mandatory because
+generic specifications may contain maps, slices or pointers:
 
 ```go
 manager, err := reconciliation.NewManager[Spec, Observed](
@@ -125,6 +165,7 @@ manager, err := reconciliation.NewManager[Spec, Observed](
 if err != nil {
 	return err
 }
+defer manager.Close(ctx)
 
 future := manager.Submit(ctx, reconciliation.Desired[Spec]{
 	Key: "service/api", Generation: 7, Spec: desired,
@@ -132,82 +173,77 @@ future := manager.Submit(ctx, reconciliation.Desired[Spec]{
 result, err := future.Await(ctx)
 ```
 
-The context passed to `Submit` controls admission, not the accepted work's
-lifetime. The manager owns execution until completion or shutdown. A newer
-generation supersedes older pending work for the same key; submissions of the
-same accepted generation coalesce but receive independently owned condition
-slices.
+The `Submit` context controls admission only; the manager owns accepted
+work until it completes or the manager shuts down. A newer generation
+supersedes older pending work for the same key (`ErrSuperseded`); equal
+generations coalesce. A successful result with `RequeueAfter` keeps the
+generation pending until an absolute deadline, visible as
+`Pending.RetryAt` in `Manager.Pending()` snapshots
+([`ExampleManager_Pending`](example_test.go)). `Close` stops admission,
+fails pending work with `concurrency.ErrClosed`, lets active work finish
+until its context ends, then cancels it with one shutdown cause.
 
-If a successful result sets `RequeueAfter`, the same desired generation becomes
-pending until its absolute retry deadline. `Manager.Pending()` returns
-key-sorted, cloned snapshots; `RetryAt.IsZero()` means ready immediately. See
-the deterministic [`ExampleManager_Pending`](example_test.go).
+### Status
 
-Always close a manager. `Close` stops admission and pending work immediately,
-allows active work to finish until its context expires, then cancels remaining
-work with the selected shutdown cause.
+Carry a `StatusSink` through a call with `WithStatusSink`, or configure one
+on a manager with `WithManagerStatusSink`. `EventStream` (from
+`NewEventStream`) gives each subscriber an independent bounded queue;
+publishers never wait, and a lagging subscriber later receives a
+`StatusDropped` event with the number of omitted events.
 
-## Transfer pending work
+### Handoff
 
-The `handoff` package exports only desired state that has not started and its
-absolute retry deadline. It deliberately excludes running calls, action plans,
-undo values, errors, and resource rights.
+The `handoff` package transfers only desired state that has not started,
+with its absolute retry deadline. Convert `Manager.Pending()` to
+`handoff.Pending`, export with `handoff.NewExporter`, adopt with
+`handoff.NewAdopter`, and resubmit on the successor, honouring a future
+`RetryAt` ([`handoff.ExampleExporter`](handoff/example_test.go)). Artifacts
+use media type `application/vnd.justusschock.reconciliation+json`, schema
+version 1, canonical key order and UTC deadlines. A `Codec` encodes
+specifications: `Marshal` may reuse scratch storage, while `Unmarshal` must
+return an independently owned value (for example `bytes.Clone(data)`).
 
-Convert the result of `Manager.Pending()` to `handoff.Pending`, export it, and
-reverse the mapping after adoption. Preserve a future `RetryAt` when scheduling
-work on the destination; submit zero or elapsed deadlines immediately. The
-compile-checked [`handoff.ExampleExporter`](handoff/example_test.go) demonstrates
-the complete conversion and UTC deadline round trip.
+## Packages
 
-`Codec.Marshal` may reuse scratch bytes because the exporter copies each result
-immediately. `Codec.Unmarshal` has the opposite contract: it must return an
-independently owned specification that remains stable across future codec
-calls. A byte-slice codec must clone decoder input, for example:
+| Package | Description |
+|---|---|
+| [`github.com/justusschock/go-reconciliation`](https://pkg.go.dev/github.com/justusschock/go-reconciliation) | Plans, engine, retry policy, manager and status events. |
+| [`github.com/justusschock/go-reconciliation/handoff`](https://pkg.go.dev/github.com/justusschock/go-reconciliation/handoff) | Export and adoption of pending work through lifecycle artifacts. |
 
-```go
-func (codec) Unmarshal(data []byte) ([]byte, error) {
-	return bytes.Clone(data), nil
-}
-```
+Packages under `internal/` (none at present) are not part of the API.
 
-Artifacts use media type
-`application/vnd.justusschock.reconciliation+json`, schema version 1,
-canonical key ordering, UTC deadlines, and the identity/digest validation from
-`go-lifecycle/handoff`.
+## Design and guarantees
 
-## Observe status
+- **Concurrency.** `Engine` does not serialize calls; adapters and
+  `Policy.Jitter` shared by concurrent calls must be safe for concurrent
+  use. `Manager` and `EventStream` are safe for concurrent use. The test
+  suite runs under the race detector.
+- **Cancellation.** Every blocking operation takes a `context.Context` and
+  reports `context.Cause`. Rollback deliberately outlives caller
+  cancellation, bounded by `RollbackTimeout`.
+- **Errors.** Failure categories are sentinels (`ErrInvalidPlan`,
+  `ErrInvalidPolicy`, `ErrSuperseded`, …) matched with `errors.Is`. A failed
+  rollback is joined to the primary error and stops retries. Messages may
+  contain keys and action IDs but never specifications or undo values.
+- **Ownership.** Specifications, observations, actions and undo values are
+  shallow; the manager clones specifications with your `CloneSpec`, and the
+  library copies the slices it owns.
+- **Stability.** The module is `v0.x`: a minor release may break the API.
+  Every break is listed in the [changelog](CHANGELOG.md) and backed by an
+  ADR.
 
-Carry a `StatusSink` through a reconciliation call with `WithStatusSink`, or
-configure one on a manager with `WithManagerStatusSink`. `EventStream` gives
-each subscriber an independent bounded queue. Publishers never wait for slow
-consumers; after a consumer catches up it receives a `StatusDropped` event with
-the number of omitted events.
+## Documentation
 
-## Ownership and errors
+- [docs/README.md](docs/README.md): requirements (PRD) and architecture
+  decision records.
+- API reference on [pkg.go.dev](https://pkg.go.dev/github.com/justusschock/go-reconciliation).
 
-- `Desired.Spec`, `Result.Observed`, action values, and undo values are shallow
-  by default. Domain adapters define their ownership.
-- Plan functions copy action/dependency slice storage; managers use the
-  required `CloneSpec`; handoff codecs follow the ownership contract above.
-- Validation and lifecycle errors wrap stable sentinels, so use `errors.Is`
-  rather than matching text.
-- Error messages may contain generic keys/action IDs for diagnosis but do not
-  serialize specifications or undo values.
+## Contributing
 
-## Development
-
-Run the focused repository gates:
-
-```bash
-go test -race ./...
-go vet ./...
-go mod verify
-pre-commit run --all-files
-```
-
-Implementation plans live under `docs/` and are intentionally ignored. They
-must never be committed.
+Contributions go through pull requests; nothing is pushed to `main`
+directly. Read [AGENTS.md](AGENTS.md) first: it describes the docs-first
+process, the API rules and the checks to run before opening a pull request.
 
 ## License
 
-Apache License 2.0. See [LICENSE](LICENSE).
+Apache License 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
